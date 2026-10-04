@@ -1,6 +1,7 @@
 package com.example.personaldocumentfinder
 
 import com.example.personaldocumentfinder.domain.DocumentClassifier
+import com.example.personaldocumentfinder.domain.DocumentDetectionState
 import com.example.personaldocumentfinder.domain.DocumentDetector
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -16,11 +17,26 @@ class DocumentDetectorTest {
         val mimeType = "image/jpeg"
 
         val detection = DocumentDetector.detect(ocrText, fileName, mimeType)
+        assertEquals(DocumentDetectionState.NON_DOCUMENT, detection.state)
         assertFalse(detection.isDocument)
 
         val classification = DocumentClassifier.classify(ocrText, fileName, mimeType)
         assertFalse(classification.isDocument)
-        assertEquals("Other Documents", classification.category)
+    }
+
+    @Test
+    fun testSingleIncidentalWordPhotoRejection() {
+        // Photo of a cereal box or signboard with just the word "bill" or "tax"
+        val ocrText = "super bill"
+        val fileName = "IMG_9912.jpg"
+        val mimeType = "image/jpeg"
+
+        val detection = DocumentDetector.detect(ocrText, fileName, mimeType)
+        assertEquals(DocumentDetectionState.NON_DOCUMENT, detection.state)
+        assertFalse(detection.isDocument)
+
+        val classification = DocumentClassifier.classify(ocrText, fileName, mimeType)
+        assertFalse(classification.isDocument)
     }
 
     @Test
@@ -30,6 +46,7 @@ class DocumentDetectorTest {
         val mimeType = "image/png"
 
         val detection = DocumentDetector.detect(ocrText, fileName, mimeType)
+        assertEquals(DocumentDetectionState.DOCUMENT, detection.state)
         assertTrue(detection.isDocument)
 
         val classification = DocumentClassifier.classify(ocrText, fileName, mimeType)
@@ -45,6 +62,7 @@ class DocumentDetectorTest {
         val mimeType = "image/jpeg"
 
         val detection = DocumentDetector.detect(ocrText, fileName, mimeType)
+        assertEquals(DocumentDetectionState.DOCUMENT, detection.state)
         assertTrue(detection.isDocument)
 
         val classification = DocumentClassifier.classify(ocrText, fileName, mimeType)

@@ -67,6 +67,7 @@ fun HomeScreen(
 ) {
     val context = LocalContext.current
     val allDocuments by viewModel.allDocuments.collectAsState()
+    val categoryCounts by viewModel.categoryCounts.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
     val searchResults by viewModel.searchResults.collectAsState()
     val importState by viewModel.importState.collectAsState()
@@ -185,11 +186,16 @@ fun HomeScreen(
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(14.dp)
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp)
                     ) {
                         CircularProgressIndicator(modifier = Modifier.width(24.dp))
                         Spacer(modifier = Modifier.width(12.dp))
-                        Text(text = progress, fontSize = 13.sp)
+                        Text(text = progress, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                        TextButton(onClick = { viewModel.stopDeviceScan() }) {
+                            Text("Stop", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
                     }
                 }
             }
@@ -203,7 +209,7 @@ fun HomeScreen(
             )
         }
 
-        // Category Cards Grid
+        // Category Cards Grid with persistent categoryCounts Map
         item {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 for (i in CATEGORY_ITEMS.indices step 2) {
@@ -212,7 +218,7 @@ fun HomeScreen(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         val item1 = CATEGORY_ITEMS[i]
-                        val count1 by viewModel.getCategoryCount(item1.name).collectAsState()
+                        val count1 = categoryCounts[item1.name] ?: 0
 
                         CategoryCardItem(
                             icon = item1.icon,
@@ -224,7 +230,7 @@ fun HomeScreen(
 
                         if (i + 1 < CATEGORY_ITEMS.size) {
                             val item2 = CATEGORY_ITEMS[i + 1]
-                            val count2 by viewModel.getCategoryCount(item2.name).collectAsState()
+                            val count2 = categoryCounts[item2.name] ?: 0
 
                             CategoryCardItem(
                                 icon = item2.icon,

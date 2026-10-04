@@ -16,7 +16,7 @@ object DocumentClassifier {
         "hall ticket", "hallticket", "examination", "university", "college",
         "marksheet", "transcript", "admit card", "seat no", "roll no",
         "student", "semester", "degree", "diploma", "board of examination",
-        "institute of technology", "grade card", "academic"
+        "institute of technology", "grade card", "academic", "bonafide"
     )
 
     private val identityKeywords = listOf(
@@ -30,7 +30,7 @@ object DocumentClassifier {
         "receipt", "invoice", "bill", "payment", "bank statement",
         "transaction", "amount paid", "tax invoice", "account number", "account no",
         "debit", "credit", "upi id", "gstin", "paid via", "total amount",
-        "subtotal", "payment summary", "salary statement", "passbook"
+        "subtotal", "payment summary", "salary statement", "passbook", "cheque"
     )
 
     private val officeKeywords = listOf(
@@ -60,10 +60,10 @@ object DocumentClassifier {
         val lowerText = ocrText.lowercase()
         val lowerName = fileName.lowercase()
 
-        // 1. Run Document Detection
+        // 1. Run Precision Document Detection
         val detection = DocumentDetector.detect(ocrText, fileName, mimeType)
 
-        if (!detection.isDocument) {
+        if (detection.state == DocumentDetectionState.NON_DOCUMENT) {
             return ClassificationResult(
                 isDocument = false,
                 documentType = "Photograph / Non-Document",
@@ -104,12 +104,15 @@ object DocumentClassifier {
             selectedCategory = maxEntry!!.key
             documentType = determineDocumentType(selectedCategory, lowerText, lowerName)
         } else {
+            // Genuine document but category is uncertain -> Other Documents
             selectedCategory = "Other Documents"
             documentType = determineGenericDocumentType(mimeType, lowerName)
         }
 
+        val isHighConfidenceDocument = detection.state == DocumentDetectionState.DOCUMENT
+
         return ClassificationResult(
-            isDocument = true,
+            isDocument = isHighConfidenceDocument,
             documentType = documentType,
             category = selectedCategory,
             documentConfidence = detection.documentConfidence,

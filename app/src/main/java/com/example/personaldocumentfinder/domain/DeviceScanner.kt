@@ -27,11 +27,12 @@ class DeviceScanner(private val context: Context) {
         "pdf", "jpg", "jpeg", "png", "txt", "doc", "docx"
     )
 
-    fun scanSharedStorage(batchSize: Int = 25): Flow<List<DiscoveredCandidate>> = flow {
-        val discoveredList = mutableListOf<DiscoveredCandidate>()
+    fun scanSharedStorage(batchSize: Int = 20): Flow<List<DiscoveredCandidate>> = flow {
+        val discoveredBatch = mutableListOf<DiscoveredCandidate>()
         val seenPaths = mutableSetOf<String>()
+        val seenUris = mutableSetOf<String>()
 
-        // 1. Scan MediaStore Files
+        // 1. Unified MediaStore Query
         val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL)
         } else {
@@ -90,9 +91,11 @@ class DeviceScanner(private val context: Context) {
 
                     val ext = name.substringAfterLast('.', "").lowercase()
                     if (ext in supportedExtensions || mimeType.startsWith("image/") || mimeType == "application/pdf") {
-                        if (filePath.isNotBlank() && seenPaths.add(filePath)) {
-                            val contentUri = ContentUris.withAppendedId(collection, id)
-                            discoveredList.add(
+                        val contentUri = ContentUris.withAppendedId(collection, id)
+                        val uriString = contentUri.toString()
+
+                        if (size > 0 && seenUris.add(uriString) && (filePath.isBlank() || seenPaths.add(filePath))) {
+                            discoveredBatch.add(
                                 DiscoveredCandidate(
                                     uri = contentUri,
                                     name = name,
@@ -103,9 +106,9 @@ class DeviceScanner(private val context: Context) {
                                 )
                             )
 
-                            if (discoveredList.size >= batchSize) {
-                                emit(discoveredList.toList())
-                                discoveredList.clear()
+                            if (discoveredBatch.size >= batchSize) {
+                                emit(discoveredBatch.toList())
+                                discoveredBatch.clear()
                             }
                         }
                     }
@@ -115,7 +118,7 @@ class DeviceScanner(private val context: Context) {
             e.printStackTrace()
         }
 
-        // 2. Direct File System Scan if All Files Access is granted
+        // 2. Secondary Direct Folder Check (For files not indexed by MediaStore yet when All Files Access is granted)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && Environment.isExternalStorageManager()) {
             val rootExternal = Environment.getExternalStorageDirectory()
             val targetDirs = listOf(
@@ -135,23 +138,22 @@ class DeviceScanner(private val context: Context) {
                     for (file in files) {
                         if (seenPaths.add(file.absolutePath)) {
                             val fileUri = Uri.fromFile(file)
-                            val name = file.name
-                            val mimeType = getMimeTypeFromExtension(file.extension)
-
-                            discoveredList.add(
-                                DiscoveredCandidate(
-                                    uri = fileUri,
-                                    name = name,
-                                    mimeType = mimeType,
-                                    fileSize = file.length(),
-                                    filePath = file.absolutePath,
-                                    dateModified = file.lastModified()
+                            if (seenUris.add(fileUri.toString())) {
+                                discoveredBatch.add(
+                                    DiscoveredCandidate(
+                                        uri = fileUri,
+                                        name = file.name,
+                                        mimeType = getMimeTypeFromExtension(file.extension),
+                                        fileSize = file.length(),
+                                        filePath = file.absolutePath,
+                                        dateModified = file.lastModified()
+                                    )
                                 )
-                            )
 
-                            if (discoveredList.size >= batchSize) {
-                                emit(discoveredList.toList())
-                                discoveredList.clear()
+                                if (discoveredBatch.size >= batchSize) {
+                                    emit(discoveredBatch.toList())
+                                    discoveredBatch.clear()
+                                }
                             }
                         }
                     }
@@ -160,9 +162,9 @@ class DeviceScanner(private val context: Context) {
         }
 
         // Emit remaining items
-        if (discoveredList.isNotEmpty()) {
-            emit(discoveredList.toList())
-            discoveredList.clear()
+        if (discoveredBatch.isNotEmpty()) {
+            emit(discoveredBatch.toList())
+            discoveredBatch.clear()
         }
     }.flowOn(Dispatchers.IO)
 

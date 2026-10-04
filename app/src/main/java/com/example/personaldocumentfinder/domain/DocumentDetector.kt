@@ -1,26 +1,43 @@
 package com.example.personaldocumentfinder.domain
 
+enum class DocumentDetectionState {
+    DOCUMENT,
+    NON_DOCUMENT,
+    UNCERTAIN
+}
+
 data class DetectionResult(
-    val isDocument: Boolean,
+    val state: DocumentDetectionState,
     val documentConfidence: Float,
     val detectionReason: String
-)
+) {
+    val isDocument: Boolean
+        get() = state == DocumentDetectionState.DOCUMENT
+}
 
 object DocumentDetector {
 
-    private val documentFilenameKeywords = setOf(
-        "doc", "document", "scan", "scanned", "receipt", "invoice", "ticket",
-        "certificate", "aadhaar", "aadhar", "pan", "passport", "bill",
-        "form", "statement", "payslip", "hallticket", "hall_ticket", "marksheet",
-        "rc", "puc", "license", "licence", "tax"
+    private val multiWordPhrases = listOf(
+        "government of india", "govt of india", "unique identification",
+        "income tax department", "permanent account number", "hall ticket",
+        "admit card", "examination board", "board of examination",
+        "tax invoice", "amount paid", "bank statement", "transaction summary",
+        "registration certificate", "chassis no", "engine no", "salary slip",
+        "offer letter", "appointment letter", "medical report", "utility bill",
+        "pollution under control", "public notice", "official announcement",
+        "terms and conditions", "application form"
     )
 
-    private val documentContentKeywords = setOf(
-        "aadhaar", "aadhar", "government of india", "govt of india", "permanent account number",
-        "income tax", "hall ticket", "university", "examination", "roll no", "seat no",
-        "tax invoice", "amount paid", "bank statement", "transaction", "subtotal",
-        "registration certificate", "chassis no", "engine no", "salary slip",
-        "employee id", "prescription", "medical report", "utility bill"
+    private val documentKeywords = setOf(
+        "aadhaar", "aadhar", "passport", "marksheet", "transcript", "diploma",
+        "gstin", "subtotal", "payslip", "pf number", "rc book", "puc", "prescription",
+        "notification", "announcement", "certificate", "declaration"
+    )
+
+    private val singleAmbiguousKeywords = setOf(
+        "tax", "bill", "license", "licence", "university", "college", "school",
+        "receipt", "invoice", "statement", "certificate", "ticket", "form",
+        "office", "student", "roll", "account", "amount", "total", "paid"
     )
 
     fun detect(
@@ -40,70 +57,112 @@ object DocumentDetector {
 
         if (isPdfOrDoc) {
             return DetectionResult(
-                isDocument = true,
+                state = DocumentDetectionState.DOCUMENT,
                 documentConfidence = 0.95f,
                 detectionReason = "Document MIME type ($mimeType)"
             )
         }
 
-        // 2. Check filename hints
-        val hasFilenameHint = documentFilenameKeywords.any { keyword ->
-            lowerName.contains(keyword)
+        // 2. OCR Text Token Analysis
+        val tokens = lowerText.split(Regex("\\s+")).filter { it.length >= 2 }
+        val wordCount = tokens.size
+
+        // Photos with no or trivial text (< 3 words) are rejected as NON_DOCUMENT
+        if (wordCount < 3) {
+            return DetectionResult(
+                state = DocumentDetectionState.NON_DOCUMENT,
+                documentConfidence = 0.05f,
+                detectionReason = "Photograph / Low text density (< 3 words)"
+            )
         }
 
-        // 3. Check OCR text characteristics
-        val textLength = lowerText.length
-        val wordCount = if (lowerText.isBlank()) 0 else lowerText.split(Regex("\\s+")).size
-        val hasContentKeyword = documentContentKeywords.any { keyword ->
-            lowerText.contains(keyword)
+        // 3. Multi-Word Phrase Match (Strongest positive signal)
+        val hasMultiWordPhrase = multiWordPhrases.any { phrase -> lowerText.contains(phrase) }
+        if (hasMultiWordPhrase) {
+            return DetectionResult(
+                state = DocumentDetectionState.DOCUMENT,
+                documentConfidence = 0.90f,
+                detectionReason = "Strong document keyphrase detected in content"
+            )
         }
 
-        var confidence = 0.0f
-
-        if (hasContentKeyword) {
-            confidence += 0.6f
+        // 4. Exact Document Keyword Count
+        var documentKeywordMatches = 0
+        documentKeywords.forEach { keyword ->
+            if (lowerText.contains(keyword) || lowerName.contains(keyword)) {
+                documentKeywordMatches++
+            }
         }
 
-        if (textLength >= 30 && wordCount >= 5) {
-            confidence += 0.3f
-        } else if (textLength >= 15 && wordCount >= 3) {
-            confidence += 0.15f
+        var ambiguousKeywordMatches = 0
+        singleAmbiguousKeywords.forEach { keyword ->
+            if (lowerText.contains(keyword) || lowerName.contains(keyword)) {
+                ambiguousKeywordMatches++
+            }
         }
 
-        if (hasFilenameHint) {
-            confidence += 0.25f
+        // Multi-keyword check (At least 2 ambiguous keywords or 1 exact document keyword)
+        if (documentKeywordMatches >= 1 || ambiguousKeywordMatches >= 2) {
+            return DetectionResult(
+                state = DocumentDetectionState.DOCUMENT,
+                documentConfidence = 0.80f,
+                detectionReason = "Multiple document terminology signals matched"
+            )
         }
 
-        // Screenshot containing receipt / document content
+        // 5. Screenshot Document Layout Check
         val isScreenshot = lowerName.contains("screenshot") || lowerName.contains("screen_shot")
-        if (isScreenshot && (hasContentKeyword || wordCount >= 4)) {
-            confidence += 0.3f
+        val hasDateOrNumberPattern = lowerText.contains(Regex("\\d{2}[/-]\\d{2}[/-]\\d{2,4}")) ||
+                lowerText.contains(Regex("\\b\\d{4,12}\\b"))
+
+        if (isScreenshot && wordCount >= 6 && (hasDateOrNumberPattern || ambiguousKeywordMatches >= 1)) {
+            return DetectionResult(
+                state = DocumentDetectionState.DOCUMENT,
+                documentConfidence = 0.75f,
+                detectionReason = "Document content screenshot detected"
+            )
         }
 
-        // Check if photograph without text (e.g. IMG_1234.jpg with < 10 chars of text)
+        // 6. Camera Photo Pattern with single ambiguous word or general text
         val isCameraPhotoPattern = lowerName.startsWith("img_") ||
                 lowerName.startsWith("dcim_") ||
                 lowerName.startsWith("pxl_") ||
                 lowerName.startsWith("photo_")
 
-        if (isCameraPhotoPattern && wordCount < 3 && !hasContentKeyword && !hasFilenameHint) {
-            confidence -= 0.4f
+        if (isCameraPhotoPattern) {
+            // A camera photo with only 1 ambiguous word (e.g. "bill" on a cereal box) is NOT a document
+            if (ambiguousKeywordMatches <= 1 && wordCount < 15) {
+                return DetectionResult(
+                    state = DocumentDetectionState.NON_DOCUMENT,
+                    documentConfidence = 0.15f,
+                    detectionReason = "Casual photograph with incidental text (Rejected)"
+                )
+            }
         }
 
-        confidence = confidence.coerceIn(0.0f, 1.0f)
-        val isDocument = confidence >= 0.30f
-
-        val reason = when {
-            isDocument && hasContentKeyword -> "High-confidence document content keywords detected"
-            isDocument && isScreenshot -> "Document content screenshot detected"
-            isDocument -> "Text density & layout indicators matched document pattern"
-            else -> "Photograph / No document text detected (Rejected)"
+        // 7. General Text Density Check
+        if (wordCount >= 15 && hasDateOrNumberPattern) {
+            return DetectionResult(
+                state = DocumentDetectionState.DOCUMENT,
+                documentConfidence = 0.65f,
+                detectionReason = "Structured text & numerical fields detected"
+            )
         }
 
+        // 8. Uncertain Document Evidence
+        if (wordCount >= 10 || ambiguousKeywordMatches >= 1) {
+            return DetectionResult(
+                state = DocumentDetectionState.UNCERTAIN,
+                documentConfidence = 0.45f,
+                detectionReason = "Ambiguous document signals (Candidate Review Required)"
+            )
+        }
+
+        // Default: Non-Document Photo
         return DetectionResult(
-            isDocument = isDocument,
-            documentConfidence = confidence,
-            detectionReason = reason
+            state = DocumentDetectionState.NON_DOCUMENT,
+            documentConfidence = 0.10f,
+            detectionReason = "Non-document photograph / Casual image (Rejected)"
         )
     }
 }

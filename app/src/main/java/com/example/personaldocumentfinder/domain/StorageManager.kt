@@ -8,7 +8,7 @@ import java.io.FileOutputStream
 import java.io.InputStream
 import java.security.MessageDigest
 
-class StorageManager(private val context: Context) {
+open class StorageManager(private val context: Context) {
 
     data class StorageStats(
         val totalBytes: Long,
@@ -22,6 +22,24 @@ class StorageManager(private val context: Context) {
         val mimeType: String,
         val contentHash: String
     )
+
+    open fun calculateContentHash(uri: Uri): String? {
+        return try {
+            val digest = MessageDigest.getInstance("SHA-256")
+            context.contentResolver.openInputStream(uri)?.use { inputStream ->
+                val buffer = ByteArray(8192)
+                var bytesRead: Int
+                while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                    digest.update(buffer, 0, bytesRead)
+                }
+            } ?: return null
+            val hashBytes = digest.digest()
+            hashBytes.joinToString("") { "%02x".format(it) }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
+        }
+    }
 
     fun copyFileToAppPrivateStorage(uri: Uri, category: String, customFileName: String? = null): CopyResult? {
         return try {
@@ -82,7 +100,6 @@ class StorageManager(private val context: Context) {
             if (currentFile.renameTo(newFile)) {
                 newFile.absolutePath
             } else {
-                // Fallback copy & delete
                 currentFile.copyTo(newFile, overwrite = true)
                 currentFile.delete()
                 newFile.absolutePath
