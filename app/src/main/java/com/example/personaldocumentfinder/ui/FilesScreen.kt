@@ -2,6 +2,7 @@ package com.example.personaldocumentfinder.ui
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -46,14 +47,17 @@ fun FilesScreen(
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
+    val isDatabaseLoaded by viewModel.isDatabaseLoaded.collectAsState()
+    val isSearchLoading by viewModel.isSearchLoading.collectAsState()
     val documents by viewModel.allDocuments.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
-    val searchResults by viewModel.searchResults.collectAsState()
+    val rankedSearchResults by viewModel.rankedSearchResults.collectAsState()
     val importState by viewModel.importState.collectAsState()
     val statusMessage by viewModel.statusMessage.collectAsState()
 
     var documentToMove by remember { mutableStateOf<DocumentEntity?>(null) }
     var documentToDelete by remember { mutableStateOf<DocumentEntity?>(null) }
+    var documentToRename by remember { mutableStateOf<DocumentEntity?>(null) }
 
     val filePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments()
@@ -70,8 +74,6 @@ fun FilesScreen(
         }
     }
 
-    val displayedList = if (searchQuery.isNotBlank()) searchResults else documents
-
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -86,7 +88,7 @@ fun FilesScreen(
             }
             Spacer(modifier = Modifier.width(16.dp))
             Text(
-                text = "📂 My Documents",
+                text = "📁 My Documents",
                 fontSize = 24.sp,
                 fontWeight = FontWeight.Bold
             )
@@ -99,7 +101,18 @@ fun FilesScreen(
             onValueChange = { viewModel.setSearchQuery(it) },
             placeholder = { Text("Search by name, OCR text, or category...") },
             modifier = Modifier.fillMaxWidth(),
-            singleLine = true
+            singleLine = true,
+            trailingIcon = {
+                if (searchQuery.isNotEmpty()) {
+                    Text(
+                        text = "✕",
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .clickable { viewModel.setSearchQuery("") }
+                            .padding(12.dp)
+                    )
+                }
+            }
         )
 
         Spacer(modifier = Modifier.height(12.dp))
@@ -138,8 +151,15 @@ fun FilesScreen(
             Spacer(modifier = Modifier.height(8.dp))
         }
 
+        val totalMatches = rankedSearchResults.primaryMatches.size + rankedSearchResults.mentionMatches.size
+        val countLabel = if (isDatabaseLoaded) {
+            if (searchQuery.isNotBlank()) "$totalMatches result(s) found" else "${documents.size} document(s) stored"
+        } else {
+            "— document(s) stored"
+        }
+
         Text(
-            text = "${displayedList.size} document(s) stored",
+            text = countLabel,
             fontSize = 14.sp,
             fontWeight = FontWeight.SemiBold,
             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -147,37 +167,134 @@ fun FilesScreen(
 
         Spacer(modifier = Modifier.height(10.dp))
 
-        if (displayedList.isEmpty()) {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("📄", fontSize = 48.sp)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = if (searchQuery.isNotBlank()) "No matching documents found" else "No documents imported yet",
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Medium
-                    )
+        if (searchQuery.isNotBlank()) {
+            if (isSearchLoading) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(modifier = Modifier.width(24.dp))
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text("Searching documents...", fontSize = 14.sp)
+                    }
+                }
+            } else if (rankedSearchResults.primaryMatches.isEmpty() && rankedSearchResults.mentionMatches.isEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("📄", fontSize = 48.sp)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "No matching documents found",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+            } else {
+                LazyColumn(
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    if (rankedSearchResults.primaryMatches.isNotEmpty()) {
+                        items(rankedSearchResults.primaryMatches, key = { it.id }) { doc ->
+                            DocumentCard(
+                                document = doc,
+                                onOpen = { viewModel.openDocument(context, doc) },
+                                onRename = { documentToRename = doc },
+                                onChangeCategory = { documentToMove = doc },
+                                onToggleFavorite = { viewModel.toggleFavorite(doc) },
+                                onDelete = { documentToDelete = doc }
+                            )
+                        }
+                    }
+
+                    if (rankedSearchResults.mentionMatches.isNotEmpty()) {
+                        item {
+                            Text(
+                                text = if (rankedSearchResults.primaryMatches.isNotEmpty()) {
+                                    "Other documents mentioning \"$searchQuery\""
+                                } else {
+                                    "Documents mentioning \"$searchQuery\""
+                                },
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 10.dp, bottom = 4.dp)
+                            )
+                        }
+                        items(rankedSearchResults.mentionMatches, key = { it.id }) { doc ->
+                            DocumentCard(
+                                document = doc,
+                                onOpen = { viewModel.openDocument(context, doc) },
+                                onRename = { documentToRename = doc },
+                                onChangeCategory = { documentToMove = doc },
+                                onToggleFavorite = { viewModel.toggleFavorite(doc) },
+                                onDelete = { documentToDelete = doc }
+                            )
+                        }
+                    }
                 }
             }
         } else {
-            LazyColumn(
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-                modifier = Modifier.fillMaxSize()
-            ) {
-                items(displayedList, key = { it.id }) { doc ->
-                    DocumentCard(
-                        document = doc,
-                        onOpen = { viewModel.openDocument(context, doc) },
-                        onChangeCategory = { documentToMove = doc },
-                        onToggleFavorite = { viewModel.toggleFavorite(doc) },
-                        onDelete = { documentToDelete = doc }
-                    )
+            if (!isDatabaseLoaded) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        CircularProgressIndicator(modifier = Modifier.width(36.dp))
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text("Loading documents...", fontSize = 14.sp)
+                    }
+                }
+            } else if (documents.isEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("📄", fontSize = 48.sp)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "No documents imported yet",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+            } else {
+                LazyColumn(
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    items(documents, key = { it.id }) { doc ->
+                        DocumentCard(
+                            document = doc,
+                            onOpen = { viewModel.openDocument(context, doc) },
+                            onRename = { documentToRename = doc },
+                            onChangeCategory = { documentToMove = doc },
+                            onToggleFavorite = { viewModel.toggleFavorite(doc) },
+                            onDelete = { documentToDelete = doc }
+                        )
+                    }
                 }
             }
         }
+    }
+
+    documentToRename?.let { doc ->
+        DocumentRenameDialog(
+            currentName = doc.effectiveDisplayName,
+            onSave = { newName ->
+                viewModel.renameDocument(doc, newName)
+                documentToRename = null
+            },
+            onDismiss = { documentToRename = null }
+        )
     }
 
     documentToMove?.let { doc ->
@@ -195,7 +312,7 @@ fun FilesScreen(
         AlertDialog(
             onDismissRequest = { documentToDelete = null },
             title = { Text("Remove Document") },
-            text = { Text("Are you sure you want to remove '${doc.originalName}' from Personal Document Finder?") },
+            text = { Text("Are you sure you want to remove '${doc.effectiveDisplayName}' from Personal Document Finder?") },
             confirmButton = {
                 TextButton(
                     onClick = {

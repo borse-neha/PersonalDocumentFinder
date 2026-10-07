@@ -11,9 +11,13 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
 class FakeDocumentDao : DocumentDao {
     val documents = mutableListOf<DocumentEntity>()
@@ -23,19 +27,77 @@ class FakeDocumentDao : DocumentDao {
         return document.id
     }
 
-    override suspend fun updateDocument(document: DocumentEntity) {}
+    override suspend fun updateDocument(document: DocumentEntity) {
+        val index = documents.indexOfFirst { it.id == document.id }
+        if (index != -1) {
+            documents[index] = document
+        }
+    }
     override suspend fun deleteDocument(document: DocumentEntity) { documents.remove(document) }
     override suspend fun getDocumentById(id: Long): DocumentEntity? = documents.find { it.id == id }
     override suspend fun getDocumentByHash(hash: String): DocumentEntity? = documents.find { it.contentHash == hash }
     override suspend fun getDocumentByUri(uri: String): DocumentEntity? = documents.find { it.originalUri == uri }
     override suspend fun getDocumentByNameAndSize(name: String, size: Long): DocumentEntity? = documents.find { it.originalName == name && it.fileSize == size }
+    override suspend fun getDocumentByDisplayName(displayName: String): DocumentEntity? = documents.find { it.displayName == displayName }
+    override suspend fun getExistingDisplayNamesStartingWith(name: String): List<String> = documents.map { it.displayName }.filter { it == name || it.startsWith("$name (") }
     override fun getAllDocumentsFlow(): Flow<List<DocumentEntity>> = flowOf(documents)
     override fun getDocumentsByCategoryFlow(category: String): Flow<List<DocumentEntity>> = flowOf(documents.filter { it.category == category })
     override fun getFavoriteDocumentsFlow(): Flow<List<DocumentEntity>> = flowOf(documents.filter { it.isFavorite })
-    override fun searchDocumentsFlow(query: String): Flow<List<DocumentEntity>> = flowOf(documents)
+
+    override fun searchDocumentsFlow(query: String): Flow<List<DocumentEntity>> {
+        val lower = query.lowercase().trim()
+        if (lower.isEmpty()) return flowOf(documents)
+        return flowOf(documents.filter { doc ->
+            doc.displayName.lowercase().contains(lower) ||
+            doc.originalName.lowercase().contains(lower) ||
+            doc.ocrText.lowercase().contains(lower) ||
+            doc.category.lowercase().contains(lower) ||
+            doc.documentType.lowercase().contains(lower)
+        })
+    }
+
+    override fun searchDocumentsMultiWordFlow(
+        w1: String,
+        w1_alt: String,
+        w2: String,
+        w2_alt: String,
+        w3: String,
+        w3_alt: String,
+        w4: String,
+        w4_alt: String,
+        w5: String,
+        w5_alt: String
+    ): Flow<List<DocumentEntity>> {
+        val pairs = listOf(w1 to w1_alt, w2 to w2_alt, w3 to w3_alt, w4 to w4_alt, w5 to w5_alt)
+            .filter { it.first.trim().isNotEmpty() }
+            .map { (w, alt) -> listOf(w.lowercase().trim(), alt.lowercase().trim()).filter { it.isNotEmpty() } }
+
+        if (pairs.isEmpty()) return flowOf(documents)
+        return flowOf(documents.filter { doc ->
+            val docFields = listOf(
+                doc.displayName.lowercase(),
+                doc.originalName.lowercase(),
+                doc.ocrText.lowercase(),
+                doc.category.lowercase(),
+                doc.documentType.lowercase()
+            )
+            pairs.all { termVariants ->
+                termVariants.any { variant ->
+                    docFields.any { it.contains(variant) }
+                }
+            }
+        })
+    }
+
     override fun getCountByCategoryFlow(category: String): Flow<Int> = flowOf(documents.count { it.category == category })
     override fun getTotalDocumentCountFlow(): Flow<Int> = flowOf(documents.size)
     override suspend fun updateCategory(id: Long, newCategory: String, timestamp: Long) {}
+    override suspend fun updateDisplayName(id: Long, newDisplayName: String, timestamp: Long) {
+        val index = documents.indexOfFirst { it.id == id }
+        if (index != -1) {
+            documents[index] = documents[index].copy(displayName = newDisplayName, lastModified = timestamp)
+        }
+    }
     override suspend fun toggleFavorite(id: Long, isFavorite: Boolean) {}
 }
 
@@ -47,6 +109,8 @@ class TestStorageManager : StorageManager(StubContext()) {
 
 class StubContext : android.content.ContextWrapper(null)
 
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34])
 class DuplicateDetectionTest {
 
     private lateinit var fakeDao: FakeDocumentDao
@@ -107,43 +171,76 @@ class DuplicateDetectionTest {
         )
 
         val testStorageManager = TestStorageManager()
+        testStorageManager.stubHash = "different_hash_xyz"
 
         val filtered = candidateRepository.filterUnimportedCandidates(testStorageManager, listOf(candidate))
-
         assertTrue(filtered.isEmpty())
     }
 
     @Test
-    fun testRenamedIdenticalContentIsSkippedByHash() = runBlocking {
-        val uri = Uri.parse("content://media/external/file/202")
+    fun testDuplicateContentHashCandidateIsSkipped() = runBlocking {
+        val uri = Uri.parse("content://media/external/file/102")
         val candidate = DiscoveredCandidate(
             uri = uri,
-            name = "random_8392.jpg", // Renamed filename
-            mimeType = "image/jpeg",
-            fileSize = 204800L,
-            filePath = "/storage/emulated/0/Pictures/random_8392.jpg",
+            name = "Copy_Of_HallTicket.pdf",
+            mimeType = "application/pdf",
+            fileSize = 102400L,
+            filePath = "/storage/emulated/0/Download/Copy_Of_HallTicket.pdf",
+            dateModified = System.currentTimeMillis()
+        )
+
+        fakeDao.insertDocument(
+            DocumentEntity(
+                id = 1L,
+                originalName = "Original_HallTicket.pdf",
+                storedFileName = "Original_HallTicket.pdf",
+                mimeType = "application/pdf",
+                originalUri = "content://media/external/file/999",
+                internalPath = "/data/user/0/com.example/files/College/Original_HallTicket.pdf",
+                category = "College",
+                documentType = "Hall Ticket",
+                contentHash = "same_content_hash_123"
+            )
+        )
+
+        val testStorageManager = TestStorageManager()
+        testStorageManager.stubHash = "same_content_hash_123"
+
+        val filtered = candidateRepository.filterUnimportedCandidates(testStorageManager, listOf(candidate))
+        assertTrue(filtered.isEmpty())
+    }
+
+    @Test
+    fun testSameNameAndSizeCandidateIsSkipped() = runBlocking {
+        val uri = Uri.parse("content://media/external/file/103")
+        val candidate = DiscoveredCandidate(
+            uri = uri,
+            name = "ImportantDoc.pdf",
+            mimeType = "application/pdf",
+            fileSize = 51200L,
+            filePath = "/storage/emulated/0/Download/ImportantDoc.pdf",
             dateModified = System.currentTimeMillis()
         )
 
         fakeDao.insertDocument(
             DocumentEntity(
                 id = 2L,
-                originalName = "Aadhaar_1.jpg", // Original imported filename
-                storedFileName = "Aadhaar_1.jpg",
-                mimeType = "image/jpeg",
-                originalUri = "content://media/external/file/101",
-                internalPath = "/data/user/0/com.example/files/Identity/Aadhaar_1.jpg",
-                category = "Identity",
-                documentType = "Aadhaar Card",
-                contentHash = "identical_sha256_hash_xyz999"
+                originalName = "ImportantDoc.pdf",
+                storedFileName = "ImportantDoc.pdf",
+                mimeType = "application/pdf",
+                originalUri = "content://media/external/file/888",
+                internalPath = "/data/user/0/com.example/files/Other/ImportantDoc.pdf",
+                category = "Other Documents",
+                documentType = "Other Document",
+                fileSize = 51200L,
+                contentHash = ""
             )
         )
 
         val testStorageManager = TestStorageManager()
-        testStorageManager.stubHash = "identical_sha256_hash_xyz999"
+        testStorageManager.stubHash = "random_hash"
 
         val filtered = candidateRepository.filterUnimportedCandidates(testStorageManager, listOf(candidate))
-
-        assertTrue(filtered.isEmpty()) // Renamed file with identical SHA-256 content is skipped!
+        assertTrue(filtered.isEmpty())
     }
 }

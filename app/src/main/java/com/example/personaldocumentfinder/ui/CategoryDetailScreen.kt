@@ -18,12 +18,10 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -61,9 +59,11 @@ fun CategoryDetailScreen(
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
+    val isDatabaseLoaded by viewModel.isDatabaseLoaded.collectAsState()
     val documents by viewModel.getCategoryDocuments(category).collectAsState()
     var documentToMove by remember { mutableStateOf<DocumentEntity?>(null) }
     var documentToDelete by remember { mutableStateOf<DocumentEntity?>(null) }
+    var documentToRename by remember { mutableStateOf<DocumentEntity?>(null) }
 
     Column(
         modifier = modifier
@@ -85,7 +85,7 @@ fun CategoryDetailScreen(
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    text = "${documents.size} document(s)",
+                    text = if (isDatabaseLoaded) "${documents.size} document(s)" else "— document(s)",
                     fontSize = 14.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -94,7 +94,22 @@ fun CategoryDetailScreen(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        if (documents.isEmpty()) {
+        if (!isDatabaseLoaded) {
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator(modifier = Modifier.width(36.dp))
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = "Loading $category documents...",
+                        fontSize = 14.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        } else if (documents.isEmpty()) {
             Box(
                 modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center
@@ -123,6 +138,7 @@ fun CategoryDetailScreen(
                     DocumentCard(
                         document = doc,
                         onOpen = { viewModel.openDocument(context, doc) },
+                        onRename = { documentToRename = doc },
                         onChangeCategory = { documentToMove = doc },
                         onToggleFavorite = { viewModel.toggleFavorite(doc) },
                         onDelete = { documentToDelete = doc }
@@ -130,6 +146,18 @@ fun CategoryDetailScreen(
                 }
             }
         }
+    }
+
+    // Rename document dialog
+    documentToRename?.let { doc ->
+        DocumentRenameDialog(
+            currentName = doc.effectiveDisplayName,
+            onSave = { newName ->
+                viewModel.renameDocument(doc, newName)
+                documentToRename = null
+            },
+            onDismiss = { documentToRename = null }
+        )
     }
 
     // Move category dialog
@@ -149,7 +177,7 @@ fun CategoryDetailScreen(
         AlertDialog(
             onDismissRequest = { documentToDelete = null },
             title = { Text("Remove Document") },
-            text = { Text("Are you sure you want to remove '${doc.originalName}' from Personal Document Finder? The app-private copy will be deleted, but original external files are not modified.") },
+            text = { Text("Are you sure you want to remove '${doc.effectiveDisplayName}' from Personal Document Finder?") },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -173,6 +201,7 @@ fun CategoryDetailScreen(
 fun DocumentCard(
     document: DocumentEntity,
     onOpen: () -> Unit,
+    onRename: () -> Unit,
     onChangeCategory: () -> Unit,
     onToggleFavorite: () -> Unit,
     onDelete: () -> Unit
@@ -204,7 +233,7 @@ fun DocumentCard(
 
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = document.originalName,
+                        text = document.effectiveDisplayName,
                         fontWeight = FontWeight.Bold,
                         fontSize = 15.sp,
                         maxLines = 1
@@ -218,7 +247,7 @@ fun DocumentCard(
                 }
 
                 TextButton(onClick = onChangeCategory) {
-                    Text("🏷️ ${document.category}", fontSize = 12.sp)
+                    Text("📂 ${document.category}", fontSize = 12.sp)
                 }
             }
 
@@ -229,20 +258,76 @@ fun DocumentCard(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                TextButton(onClick = onToggleFavorite) {
-                    Text(if (document.isFavorite) "★ Favorited" else "☆ Favorite", fontSize = 12.sp)
+                TextButton(onClick = onRename) {
+                    Text("✏️ Rename", fontSize = 12.sp)
                 }
-                Spacer(modifier = Modifier.width(8.dp))
+                Spacer(modifier = Modifier.width(4.dp))
+                TextButton(onClick = onToggleFavorite) {
+                    Text(if (document.isFavorite) "⭐ Favorited" else "☆ Favorite", fontSize = 12.sp)
+                }
+                Spacer(modifier = Modifier.width(4.dp))
                 Button(onClick = onOpen) {
                     Text("Open", fontSize = 12.sp)
                 }
-                Spacer(modifier = Modifier.width(8.dp))
+                Spacer(modifier = Modifier.width(4.dp))
                 OutlinedButton(onClick = onDelete) {
                     Text("Delete", fontSize = 12.sp)
                 }
             }
         }
     }
+}
+
+@Composable
+fun DocumentRenameDialog(
+    currentName: String,
+    onSave: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var newName by remember { mutableStateOf(currentName) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Rename Document") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = newName,
+                    onValueChange = {
+                        newName = it
+                        errorMessage = null
+                    },
+                    label = { Text("Document Name") },
+                    isError = errorMessage != null,
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                errorMessage?.let {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(text = it, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (newName.isBlank()) {
+                        errorMessage = "Name cannot be empty."
+                    } else {
+                        onSave(newName.trim())
+                    }
+                }
+            ) {
+                Text("Save")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
 }
 
 @Composable
@@ -286,6 +371,6 @@ fun getFileIcon(mimeType: String, fileName: String): String {
         mimeType == "application/pdf" -> "📄"
         mimeType.startsWith("text/") -> "📝"
         fileName.endsWith(".doc", ignoreCase = true) || fileName.endsWith(".docx", ignoreCase = true) -> "📑"
-        else -> "📂"
+        else -> "📁"
     }
 }

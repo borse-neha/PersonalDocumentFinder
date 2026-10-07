@@ -41,19 +41,16 @@ import androidx.compose.ui.unit.sp
 import com.example.personaldocumentfinder.data.DocumentEntity
 import com.example.personaldocumentfinder.domain.PermissionManager
 
-data class CategoryItem(
-    val icon: String,
-    val name: String
-)
+data class CategoryItem(val name: String, val icon: String)
 
 val CATEGORY_ITEMS = listOf(
-    CategoryItem("🎓", "College"),
-    CategoryItem("🪪", "Identity"),
-    CategoryItem("💰", "Finance"),
-    CategoryItem("🏢", "Office"),
-    CategoryItem("🚗", "Vehicle"),
-    CategoryItem("👤", "Personal"),
-    CategoryItem("📁", "Other Documents")
+    CategoryItem("College", "🎓"),
+    CategoryItem("Identity", "🪪"),
+    CategoryItem("Finance", "💳"),
+    CategoryItem("Office", "💼"),
+    CategoryItem("Vehicle", "🚗"),
+    CategoryItem("Personal", "📁"),
+    CategoryItem("Other Documents", "📄")
 )
 
 @Composable
@@ -66,15 +63,18 @@ fun HomeScreen(
     onSettingsClick: () -> Unit
 ) {
     val context = LocalContext.current
+    val isDatabaseLoaded by viewModel.isDatabaseLoaded.collectAsState()
+    val isSearchLoading by viewModel.isSearchLoading.collectAsState()
     val allDocuments by viewModel.allDocuments.collectAsState()
     val categoryCounts by viewModel.categoryCounts.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
-    val searchResults by viewModel.searchResults.collectAsState()
+    val rankedSearchResults by viewModel.rankedSearchResults.collectAsState()
     val importState by viewModel.importState.collectAsState()
     val statusMessage by viewModel.statusMessage.collectAsState()
 
     var documentToMove by remember { mutableStateOf<DocumentEntity?>(null) }
     var documentToDelete by remember { mutableStateOf<DocumentEntity?>(null) }
+    var documentToRename by remember { mutableStateOf<DocumentEntity?>(null) }
     var showPermissionDialog by remember { mutableStateOf(false) }
 
     val filePicker = rememberLauncherForActivityResult(
@@ -133,114 +133,129 @@ fun HomeScreen(
                 onValueChange = { viewModel.setSearchQuery(it) },
                 placeholder = { Text("Search by name, OCR text, or category...") },
                 modifier = Modifier.fillMaxWidth(),
-                singleLine = true
+                singleLine = true,
+                trailingIcon = {
+                    if (searchQuery.isNotEmpty()) {
+                        Text(
+                            text = "✕",
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier
+                                .clickable { viewModel.setSearchQuery("") }
+                                .padding(12.dp)
+                        )
+                    }
+                }
             )
         }
 
-        item {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    onClick = { viewModel.startDeviceScan() },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("🔍 Scan Device (Auto Find Documents)")
-                }
-
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    OutlinedButton(
-                        onClick = {
-                            filePicker.launch(
-                                arrayOf(
-                                    "application/pdf",
-                                    "image/*",
-                                    "text/plain",
-                                    "application/msword",
-                                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                                )
-                            )
-                        },
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("📄 Add Files")
-                    }
-
-                    OutlinedButton(
-                        onClick = onFilesClick,
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("📂 My Documents (${allDocuments.size})")
-                    }
-                }
-            }
-        }
-
-        if (importState is DocumentViewModel.ImportState.Processing) {
+        // When searching, hide category grid and actions so search results appear immediately below the search field
+        if (searchQuery.isBlank()) {
             item {
-                val progress = (importState as DocumentViewModel.ImportState.Processing).progress
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(14.dp)
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = { viewModel.startDeviceScan() },
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        CircularProgressIndicator(modifier = Modifier.width(24.dp))
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Text(text = progress, fontSize = 13.sp, modifier = Modifier.weight(1f))
-                        TextButton(onClick = { viewModel.stopDeviceScan() }) {
-                            Text("Stop", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                        }
+                        Text("🔍 Scan Device (Auto Find Documents)")
                     }
-                }
-            }
-        }
 
-        item {
-            Text(
-                text = "Categories",
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold
-            )
-        }
-
-        // Category Cards Grid with persistent categoryCounts Map
-        item {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                for (i in CATEGORY_ITEMS.indices step 2) {
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        val item1 = CATEGORY_ITEMS[i]
-                        val count1 = categoryCounts[item1.name] ?: 0
+                        OutlinedButton(
+                            onClick = {
+                                filePicker.launch(
+                                    arrayOf(
+                                        "application/pdf",
+                                        "image/*",
+                                        "text/plain",
+                                        "application/msword",
+                                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                                    )
+                                )
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("📄 Add Files")
+                        }
 
-                        CategoryCardItem(
-                            icon = item1.icon,
-                            title = item1.name,
-                            count = count1,
-                            modifier = Modifier.weight(1f),
-                            onClick = { onCategorySelected(item1.name) }
-                        )
+                        OutlinedButton(
+                            onClick = onFilesClick,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            val countLabel = if (isDatabaseLoaded) "(${allDocuments.size})" else "(...)"
+                            Text("📁 My Documents $countLabel")
+                        }
+                    }
+                }
+            }
 
-                        if (i + 1 < CATEGORY_ITEMS.size) {
-                            val item2 = CATEGORY_ITEMS[i + 1]
-                            val count2 = categoryCounts[item2.name] ?: 0
+            if (importState is DocumentViewModel.ImportState.Processing) {
+                item {
+                    val progress = (importState as DocumentViewModel.ImportState.Processing).progress
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(14.dp)
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.width(24.dp))
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Text(text = progress, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                            TextButton(onClick = { viewModel.stopDeviceScan() }) {
+                                Text("Stop", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            }
+
+            item {
+                Text(
+                    text = "Categories",
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            // Category Cards Grid
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    for (i in CATEGORY_ITEMS.indices step 2) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            val item1 = CATEGORY_ITEMS[i]
+                            val countText1 = if (!isDatabaseLoaded) "—" else "${categoryCounts[item1.name] ?: 0} document(s)"
 
                             CategoryCardItem(
-                                icon = item2.icon,
-                                title = item2.name,
-                                count = count2,
+                                icon = item1.icon,
+                                title = item1.name,
+                                countText = countText1,
                                 modifier = Modifier.weight(1f),
-                                onClick = { onCategorySelected(item2.name) }
+                                onClick = { onCategorySelected(item1.name) }
                             )
-                        } else {
-                            Spacer(modifier = Modifier.weight(1f))
+
+                            if (i + 1 < CATEGORY_ITEMS.size) {
+                                val item2 = CATEGORY_ITEMS[i + 1]
+                                val countText2 = if (!isDatabaseLoaded) "—" else "${categoryCounts[item2.name] ?: 0} document(s)"
+
+                                CategoryCardItem(
+                                    icon = item2.icon,
+                                    title = item2.name,
+                                    countText = countText2,
+                                    modifier = Modifier.weight(1f),
+                                    onClick = { onCategorySelected(item2.name) }
+                                )
+                            } else {
+                                Spacer(modifier = Modifier.weight(1f))
+                            }
                         }
                     }
                 }
@@ -255,43 +270,150 @@ fun HomeScreen(
             )
         }
 
-        val displayedDocs = if (searchQuery.isNotBlank()) searchResults else allDocuments.take(10)
-
-        if (displayedDocs.isEmpty()) {
-            item {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
-                ) {
-                    Column(
-                        modifier = Modifier.padding(20.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
+        if (searchQuery.isNotBlank()) {
+            if (isSearchLoading) {
+                item {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
                     ) {
-                        Text("📄", fontSize = 36.sp)
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = if (searchQuery.isNotBlank()) "No matching documents found" else "No documents imported yet",
-                            fontWeight = FontWeight.Medium,
-                            fontSize = 14.sp
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(24.dp),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.width(20.dp))
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Text("Searching documents...", fontSize = 14.sp)
+                        }
+                    }
+                }
+            } else if (rankedSearchResults.primaryMatches.isEmpty() && rankedSearchResults.mentionMatches.isEmpty()) {
+                item {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(20.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text("📄", fontSize = 36.sp)
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "No matching documents found",
+                                fontWeight = FontWeight.Medium,
+                                fontSize = 14.sp
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "Try adjusting search terms or scanning your device.",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            } else {
+                if (rankedSearchResults.primaryMatches.isNotEmpty()) {
+                    items(rankedSearchResults.primaryMatches, key = { it.id }) { doc ->
+                        DocumentCard(
+                            document = doc,
+                            onOpen = { viewModel.openDocument(context, doc) },
+                            onRename = { documentToRename = doc },
+                            onChangeCategory = { documentToMove = doc },
+                            onToggleFavorite = { viewModel.toggleFavorite(doc) },
+                            onDelete = { documentToDelete = doc }
                         )
-                        Spacer(modifier = Modifier.height(4.dp))
+                    }
+                }
+
+                if (rankedSearchResults.mentionMatches.isNotEmpty()) {
+                    item {
                         Text(
-                            text = "Tap 'Scan Device' above to search external folders, or 'Add Files' to select manually.",
-                            fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            text = if (rankedSearchResults.primaryMatches.isNotEmpty()) {
+                                "Other documents mentioning \"$searchQuery\""
+                            } else {
+                                "Documents mentioning \"$searchQuery\""
+                            },
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 10.dp, bottom = 4.dp)
+                        )
+                    }
+                    items(rankedSearchResults.mentionMatches, key = { it.id }) { doc ->
+                        DocumentCard(
+                            document = doc,
+                            onOpen = { viewModel.openDocument(context, doc) },
+                            onRename = { documentToRename = doc },
+                            onChangeCategory = { documentToMove = doc },
+                            onToggleFavorite = { viewModel.toggleFavorite(doc) },
+                            onDelete = { documentToDelete = doc }
                         )
                     }
                 }
             }
         } else {
-            items(displayedDocs, key = { it.id }) { doc ->
-                DocumentCard(
-                    document = doc,
-                    onOpen = { viewModel.openDocument(context, doc) },
-                    onChangeCategory = { documentToMove = doc },
-                    onToggleFavorite = { viewModel.toggleFavorite(doc) },
-                    onDelete = { documentToDelete = doc }
-                )
+            // Not searching: Recent documents view
+            if (!isDatabaseLoaded) {
+                item {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(24.dp),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.width(20.dp))
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Text("Loading documents...", fontSize = 14.sp)
+                        }
+                    }
+                }
+            } else if (allDocuments.isEmpty()) {
+                item {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(20.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text("📄", fontSize = 36.sp)
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "No documents imported yet",
+                                fontWeight = FontWeight.Medium,
+                                fontSize = 14.sp
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "Tap 'Scan Device' above to search external folders, or 'Add Files' to select manually.",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            } else {
+                items(allDocuments.take(10), key = { it.id }) { doc ->
+                    DocumentCard(
+                        document = doc,
+                        onOpen = { viewModel.openDocument(context, doc) },
+                        onRename = { documentToRename = doc },
+                        onChangeCategory = { documentToMove = doc },
+                        onToggleFavorite = { viewModel.toggleFavorite(doc) },
+                        onDelete = { documentToDelete = doc }
+                    )
+                }
             }
         }
     }
@@ -328,6 +450,17 @@ fun HomeScreen(
         )
     }
 
+    documentToRename?.let { doc ->
+        DocumentRenameDialog(
+            currentName = doc.effectiveDisplayName,
+            onSave = { newName ->
+                viewModel.renameDocument(doc, newName)
+                documentToRename = null
+            },
+            onDismiss = { documentToRename = null }
+        )
+    }
+
     documentToMove?.let { doc ->
         CategoryMoveDialog(
             currentCategory = doc.category,
@@ -343,7 +476,7 @@ fun HomeScreen(
         AlertDialog(
             onDismissRequest = { documentToDelete = null },
             title = { Text("Remove Document") },
-            text = { Text("Are you sure you want to remove '${doc.originalName}' from Personal Document Finder?") },
+            text = { Text("Are you sure you want to remove '${doc.effectiveDisplayName}' from Personal Document Finder?") },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -367,7 +500,7 @@ fun HomeScreen(
 fun CategoryCardItem(
     icon: String,
     title: String,
-    count: Int,
+    countText: String,
     modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
@@ -396,7 +529,7 @@ fun CategoryCardItem(
             }
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = "$count document(s)",
+                text = countText,
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

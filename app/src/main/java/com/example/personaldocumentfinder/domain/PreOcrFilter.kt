@@ -7,7 +7,8 @@ object PreOcrFilter {
         "certificate", "aadhaar", "aadhar", "pan", "passport", "bill",
         "form", "statement", "payslip", "hallticket", "hall_ticket", "marksheet",
         "rc", "puc", "license", "licence", "tax", "admit", "degree", "diploma",
-        "bonafide", "transcript", "salary", "medical", "insurance", "cheque", "passbook"
+        "bonafide", "transcript", "salary", "medical", "insurance", "cheque", "passbook",
+        "scholarship", "notice", "circular", "letter", "order", "memo", "marks", "fee"
     )
 
     fun isPlausibleCandidate(
@@ -44,18 +45,18 @@ object PreOcrFilter {
         val isInDocumentFolder = lowerPath.contains("/download/") || lowerPath.contains("/documents/") || lowerPath.contains("/scans/")
         if (isInDocumentFolder) return true
 
-        // 5. Standard camera photo patterns without document hints
-        val isCameraPhotoPattern = lowerName.startsWith("img_") ||
-                lowerName.startsWith("dcim_") ||
-                lowerName.startsWith("pxl_") ||
-                lowerName.startsWith("photo_") ||
-                lowerName.startsWith("pic_")
-
-        if (isCameraPhotoPattern && !hasFilenameHint && !isScreenshot) {
-            return false
+        // 5. Image candidate eligibility:
+        // Camera images (IMG_*.jpg, PXL_*.jpg, DCIM/*) must NEVER be rejected based on filename.
+        // As long as the file is a valid image with >= 15 KB, it is eligible for OCR and document-content detection.
+        if (mimeType.startsWith("image/") ||
+            lowerName.endsWith(".jpg") ||
+            lowerName.endsWith(".jpeg") ||
+            lowerName.endsWith(".png") ||
+            lowerName.endsWith(".webp")
+        ) {
+            return fileSize >= 15 * 1024L
         }
 
-        // Default for remaining images: plausible if size is reasonably large
-        return mimeType.startsWith("image/") && fileSize >= 20 * 1024L
+        return false
     }
 }

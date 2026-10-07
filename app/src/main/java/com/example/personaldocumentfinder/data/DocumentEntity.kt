@@ -9,6 +9,7 @@ data class DocumentEntity(
     val id: Long = 0,
     val originalName: String,
     val storedFileName: String,
+    val displayName: String = "",
     val mimeType: String,
     val originalUri: String,
     val internalPath: String,
@@ -23,4 +24,13 @@ data class DocumentEntity(
     val isFavorite: Boolean = false,
     val isReviewed: Boolean = true,
     val contentHash: String = ""
-)
+) {
+    val effectiveDisplayName: String
+        get() = if (displayName.isNotBlank()) {
+            displayName
+        } else if (documentType.isNotBlank() && documentType != "Unclassified Document" && documentType != "Photograph / Non-Document") {
+            documentType
+        } else {
+            originalName
+        }
+}

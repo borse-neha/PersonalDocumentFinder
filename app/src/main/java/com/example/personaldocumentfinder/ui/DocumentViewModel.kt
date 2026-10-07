@@ -15,6 +15,7 @@ import com.example.personaldocumentfinder.domain.FileOpener
 import com.example.personaldocumentfinder.domain.OcrAnalyzer
 import com.example.personaldocumentfinder.domain.PermissionManager
 import com.example.personaldocumentfinder.domain.PreOcrFilter
+import com.example.personaldocumentfinder.domain.RankedSearchResults
 import com.example.personaldocumentfinder.domain.StorageManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -23,12 +24,14 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class DocumentViewModel(application: Application) : AndroidViewModel(application) {
@@ -41,6 +44,9 @@ class DocumentViewModel(application: Application) : AndroidViewModel(application
 
     private var activeScanJob: Job? = null
 
+    private val _isDatabaseLoaded = MutableStateFlow(false)
+    val isDatabaseLoaded: StateFlow<Boolean> = _isDatabaseLoaded.asStateFlow()
+
     init {
         val dao = AppDatabase.getDatabase(application).documentDao()
         repository = DocumentRepository(dao)
@@ -48,6 +54,88 @@ class DocumentViewModel(application: Application) : AndroidViewModel(application
         settingsRepository = com.example.personaldocumentfinder.data.SettingsRepository(application)
         storageManager = StorageManager(application)
         deviceScanner = DeviceScanner(application)
+
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.allDocuments.collect {
+                _isDatabaseLoaded.value = true
+            }
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            reclassifyExistingDocumentsIfNeeded()
+        }
+    }
+
+    suspend fun reclassifyExistingDocumentsIfNeeded() {
+        try {
+            val docs = repository.allDocuments.first()
+            val baseOrganized = storageManager.getOrganizedBaseDir()
+            for (doc in docs) {
+                // 1. Re-run classification
+                val classification = DocumentClassifier.classify(doc.ocrText, doc.originalName, doc.mimeType)
+                val targetCategory = classification.category
+                val targetType = classification.documentType
+                val categoryChanged = doc.category != targetCategory
+                val typeChanged = doc.documentType != targetType
+
+                // 2. Physical storage migration check
+                val currentFile = File(doc.internalPath)
+                val isOutsideOrganized = !currentFile.absolutePath.startsWith(baseOrganized.absolutePath)
+                val targetCategoryDir = storageManager.getCategoryDir(targetCategory)
+                val isWrongCategoryFolder = !currentFile.parentFile?.absolutePath.equals(targetCategoryDir.absolutePath)
+
+                var newInternalPath = doc.internalPath
+                if (currentFile.exists() && (isOutsideOrganized || isWrongCategoryFolder || categoryChanged)) {
+                    val moved = storageManager.moveFileToCategory(doc.internalPath, targetCategory)
+                    if (moved != null) {
+                        newInternalPath = moved
+                    }
+                } else if (!currentFile.exists()) {
+                    // Try copying from originalUri if available
+                    try {
+                        val uri = Uri.parse(doc.originalUri)
+                        val copyRes = storageManager.copyFileToOrganizedStorage(uri, targetCategory, doc.originalName)
+                        if (copyRes != null) {
+                            newInternalPath = copyRes.internalPath
+                        }
+                    } catch (_: Exception) {}
+                }
+
+                // 3. Update displayName if auto-named or blank
+                val isAutoName = doc.displayName.isBlank() ||
+                        doc.displayName == doc.originalName ||
+                        doc.displayName.startsWith("PUC") ||
+                        doc.displayName.startsWith("Vehicle") ||
+                        doc.displayName.startsWith("Aadhaar") ||
+                        doc.displayName.startsWith("Fee Receipt") ||
+                        doc.displayName.startsWith("Hall Ticket") ||
+                        doc.displayName.startsWith("College") ||
+                        doc.displayName.startsWith("Government ID") ||
+                        doc.displayName.startsWith("Financial Document") ||
+                        doc.displayName.startsWith("Other Document")
+
+                val newDisplayName = if (isAutoName) {
+                    repository.generateUniqueDisplayName(targetType, targetCategory)
+                } else {
+                    doc.displayName
+                }
+
+                if (categoryChanged || typeChanged || newInternalPath != doc.internalPath || newDisplayName != doc.displayName) {
+                    val updatedDoc = doc.copy(
+                        category = targetCategory,
+                        documentType = targetType,
+                        documentConfidence = classification.documentConfidence,
+                        categoryConfidence = classification.categoryConfidence,
+                        internalPath = newInternalPath,
+                        displayName = newDisplayName,
+                        lastModified = System.currentTimeMillis()
+                    )
+                    repository.updateDocument(updatedDoc)
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     val themeState: StateFlow<String> = settingsRepository.themeFlow.stateIn(
@@ -64,45 +152,65 @@ class DocumentViewModel(application: Application) : AndroidViewModel(application
 
     val allDocuments: StateFlow<List<DocumentEntity>> = repository.allDocuments.stateIn(
         scope = viewModelScope,
-        started = SharingStarted.WhileSubscribed(5000),
+        started = SharingStarted.Eagerly,
         initialValue = emptyList()
     )
 
-    // Persistent Map of category counts derived from allDocuments to prevent temporary 0 count flicker
     val categoryCounts: StateFlow<Map<String, Int>> = allDocuments
         .map { docs -> docs.groupingBy { it.category }.eachCount() }
         .stateIn(
             scope = viewModelScope,
-            started = SharingStarted.WhileSubscribed(5000),
+            started = SharingStarted.Eagerly,
             initialValue = emptyMap()
         )
 
     val favoriteDocuments: StateFlow<List<DocumentEntity>> = repository.favoriteDocuments.stateIn(
         scope = viewModelScope,
-        started = SharingStarted.WhileSubscribed(5000),
+        started = SharingStarted.Eagerly,
         initialValue = emptyList()
     )
 
-    val totalCount: StateFlow<Int> = repository.totalCount.stateIn(
-        scope = viewModelScope,
-        started = SharingStarted.WhileSubscribed(5000),
-        initialValue = 0
-    )
+    val totalCount: StateFlow<Int> = allDocuments
+        .map { it.size }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = 0
+        )
 
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
 
-    val searchResults: StateFlow<List<DocumentEntity>> = _searchQuery.flatMapLatest { query ->
-        if (query.isBlank()) {
-            repository.allDocuments
+    private val _isSearchLoading = MutableStateFlow(false)
+    val isSearchLoading: StateFlow<Boolean> = _isSearchLoading.asStateFlow()
+
+    val rankedSearchResults: StateFlow<RankedSearchResults> = _searchQuery.flatMapLatest { query ->
+        val trimmed = query.trim()
+        if (trimmed.isBlank()) {
+            _isSearchLoading.value = false
+            repository.allDocuments.map { list ->
+                RankedSearchResults(primaryMatches = list, mentionMatches = emptyList())
+            }
         } else {
-            repository.searchDocuments(query.trim())
+            _isSearchLoading.value = true
+            repository.searchRankedDocuments(trimmed).map { ranked ->
+                _isSearchLoading.value = false
+                ranked
+            }
         }
     }.stateIn(
         scope = viewModelScope,
-        started = SharingStarted.WhileSubscribed(5000),
-        initialValue = emptyList()
+        started = SharingStarted.Eagerly,
+        initialValue = RankedSearchResults(emptyList(), emptyList())
     )
+
+    val searchResults: StateFlow<List<DocumentEntity>> = rankedSearchResults
+        .map { it.primaryMatches + it.mentionMatches }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = emptyList()
+        )
 
     private val _importState = MutableStateFlow<ImportState>(ImportState.Idle)
     val importState: StateFlow<ImportState> = _importState.asStateFlow()
@@ -136,11 +244,13 @@ class DocumentViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun getCategoryDocuments(category: String): StateFlow<List<DocumentEntity>> {
-        return repository.getDocumentsByCategory(category).stateIn(
-            scope = viewModelScope,
-            started = SharingStarted.WhileSubscribed(5000),
-            initialValue = emptyList()
-        )
+        return allDocuments
+            .map { docs -> docs.filter { it.category == category } }
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.Eagerly,
+                initialValue = allDocuments.value.filter { it.category == category }
+            )
     }
 
     fun getCategoryCount(category: String): StateFlow<Int> {
@@ -148,8 +258,8 @@ class DocumentViewModel(application: Application) : AndroidViewModel(application
             .map { docs -> docs.count { it.category == category } }
             .stateIn(
                 scope = viewModelScope,
-                started = SharingStarted.WhileSubscribed(5000),
-                initialValue = categoryCounts.value[category] ?: 0
+                started = SharingStarted.Eagerly,
+                initialValue = allDocuments.value.count { it.category == category }
             )
     }
 
@@ -195,13 +305,13 @@ class DocumentViewModel(application: Application) : AndroidViewModel(application
 
                     analyzedCount++
                     _importState.value = ImportState.Processing(
-                        "Discovered: $discoveredCount | Analyzing: $analyzedCount | Imported: $importedCount"
+                        "Scanning: $discoveredCount | Analyzing: $analyzedCount | OCR: ${candidate.name} | Imported: $importedCount"
                     )
 
                     // 2. OCR Extraction
                     val ocrText = OcrAnalyzer.extractText(getApplication(), candidate.uri, candidate.mimeType)
 
-                    // 3. Document Detection & Classification
+                    // 3. Document Detection & Multi-Signal Classification
                     val classification = DocumentClassifier.classify(ocrText, candidate.name, candidate.mimeType)
 
                     if (!classification.isDocument) {
@@ -209,20 +319,32 @@ class DocumentViewModel(application: Application) : AndroidViewModel(application
                         return@forEach
                     }
 
-                    // 4. Real-Time Incremental Auto Import for High-Confidence Documents
-                    val isHighConfidenceCategory = classification.category != "Other Documents" && classification.categoryConfidence >= 0.5f
+                    // 4. Evidence Confidence Check for Auto Import vs Review
+                    val isHighConfidence = classification.isDocument &&
+                            classification.documentConfidence >= 0.70f &&
+                            classification.categoryConfidence >= 0.70f &&
+                            classification.documentTypeConfidence >= 0.70f &&
+                            classification.category != "Other Documents" &&
+                            classification.documentType != "Other Document" &&
+                            classification.documentType != "Unclassified Document"
 
-                    if (isHighConfidenceCategory) {
-                        val copyResult = storageManager.copyFileToAppPrivateStorage(
+                    if (isHighConfidence) {
+                        val copyResult = storageManager.copyFileToOrganizedStorage(
                             uri = candidate.uri,
                             category = classification.category,
                             customFileName = candidate.name
                         )
 
                         if (copyResult != null) {
+                            val autoDisplayName = repository.generateUniqueDisplayName(
+                                classification.documentType,
+                                classification.category
+                            )
+
                             val documentEntity = DocumentEntity(
                                 originalName = candidate.name,
                                 storedFileName = copyResult.storedFileName,
+                                displayName = autoDisplayName,
                                 mimeType = copyResult.mimeType,
                                 originalUri = candidate.uri.toString(),
                                 internalPath = copyResult.internalPath,
@@ -242,7 +364,8 @@ class DocumentViewModel(application: Application) : AndroidViewModel(application
                             repository.insertDocument(documentEntity)
                             importedCount++
                         }
-                    } else {
+                    } else if (classification.isDocument && (classification.categoryConfidence >= 0.45f || classification.documentTypeConfidence >= 0.45f)) {
+                        // Candidate with probable evidence goes into Review Queue
                         reviewNeededCount++
                         val queueItem = CandidateImportItem(
                             uri = candidate.uri,
@@ -254,13 +377,49 @@ class DocumentViewModel(application: Application) : AndroidViewModel(application
                         val currentQueue = _candidateQueue.value.toMutableList()
                         currentQueue.add(queueItem)
                         _candidateQueue.value = currentQueue
+                    } else if (classification.isDocument) {
+                        // Low confidence generic document
+                        val copyResult = storageManager.copyFileToOrganizedStorage(
+                            uri = candidate.uri,
+                            category = "Other Documents",
+                            customFileName = candidate.name
+                        )
+                        if (copyResult != null) {
+                            val autoDisplayName = repository.generateUniqueDisplayName(
+                                classification.documentType,
+                                "Other Documents"
+                            )
+                            val documentEntity = DocumentEntity(
+                                originalName = candidate.name,
+                                storedFileName = copyResult.storedFileName,
+                                displayName = autoDisplayName,
+                                mimeType = copyResult.mimeType,
+                                originalUri = candidate.uri.toString(),
+                                internalPath = copyResult.internalPath,
+                                category = "Other Documents",
+                                documentType = classification.documentType,
+                                documentConfidence = classification.documentConfidence,
+                                categoryConfidence = classification.categoryConfidence,
+                                ocrText = classification.ocrText,
+                                fileSize = copyResult.fileSize,
+                                dateImported = System.currentTimeMillis(),
+                                lastModified = System.currentTimeMillis(),
+                                isFavorite = false,
+                                isReviewed = true,
+                                contentHash = copyResult.contentHash
+                            )
+                            repository.insertDocument(documentEntity)
+                            importedCount++
+                        }
+                    } else {
+                        skippedNonDocsCount++
                     }
                 }
             }
 
             withContext(Dispatchers.Main) {
                 if (reviewNeededCount > 0) {
-                    _statusMessage.value = "Scan complete. Imported $importedCount document(s), $reviewNeededCount requiring category review."
+                    _statusMessage.value = "Scan complete. Imported $importedCount document(s), $reviewNeededCount requiring review."
                     _importState.value = ImportState.ReviewNeeded(reviewNeededCount)
                 } else {
                     _statusMessage.value = "Scan complete. Imported $importedCount genuine document(s) ($skippedNonDocsCount non-documents skipped)."
@@ -301,7 +460,7 @@ class DocumentViewModel(application: Application) : AndroidViewModel(application
                 val ocrText = OcrAnalyzer.extractText(getApplication(), uri, mimeType)
                 val classification = DocumentClassifier.classify(ocrText, originalName, mimeType)
 
-                val copyResult = storageManager.copyFileToAppPrivateStorage(uri, classification.category, originalName)
+                val copyResult = storageManager.copyFileToOrganizedStorage(uri, classification.category, originalName)
                 var isDuplicate = false
                 if (copyResult != null) {
                     val existingDuplicate = repository.getDocumentByHash(copyResult.contentHash)
@@ -345,29 +504,28 @@ class DocumentViewModel(application: Application) : AndroidViewModel(application
         }
 
         viewModelScope.launch(Dispatchers.IO) {
-            _importState.value = ImportState.Processing("Importing ${candidates.size} document(s)...")
-
+            _importState.value = ImportState.Processing("Importing confirmed documents...")
             var importedCount = 0
-            var duplicateCount = 0
-            var deletedOriginalsCount = 0
 
             candidates.forEach { candidate ->
-                if (!candidate.classification.isDocument && candidate.selectedCategory == "Other Documents") {
-                    return@forEach
-                }
+                if (candidate.isDuplicate) return@forEach
 
-                val copyResult = storageManager.copyFileToAppPrivateStorage(
+                val copyResult = storageManager.copyFileToOrganizedStorage(
                     uri = candidate.uri,
                     category = candidate.selectedCategory,
                     customFileName = candidate.fileName
                 )
 
                 if (copyResult != null) {
-                    if (candidate.isDuplicate) duplicateCount++
+                    val autoDisplayName = repository.generateUniqueDisplayName(
+                        candidate.classification.documentType,
+                        candidate.selectedCategory
+                    )
 
                     val documentEntity = DocumentEntity(
                         originalName = candidate.fileName,
                         storedFileName = copyResult.storedFileName,
+                        displayName = autoDisplayName,
                         mimeType = copyResult.mimeType,
                         originalUri = candidate.uri.toString(),
                         internalPath = copyResult.internalPath,
@@ -386,47 +544,37 @@ class DocumentViewModel(application: Application) : AndroidViewModel(application
 
                     repository.insertDocument(documentEntity)
                     importedCount++
-
-                    if (deleteOriginals) {
-                        try {
-                            val deleted = getApplication<Application>().contentResolver.delete(candidate.uri, null, null) > 0
-                            if (deleted) deletedOriginalsCount++
-                        } catch (_: Exception) {}
-                    }
                 }
             }
 
             withContext(Dispatchers.Main) {
-                val deleteMsg = if (deletedOriginalsCount > 0) " ($deletedOriginalsCount original file(s) removed)" else ""
-                _statusMessage.value = if (duplicateCount > 0) {
-                    "Imported $importedCount document(s) ($duplicateCount duplicate content detected)$deleteMsg."
-                } else {
-                    "Imported $importedCount document(s) with OCR analysis$deleteMsg."
-                }
                 clearCandidateQueue()
+                _statusMessage.value = "Imported $importedCount document(s) into library."
             }
         }
     }
 
     fun updateDocumentCategory(document: DocumentEntity, newCategory: String) {
-        if (document.category == newCategory) return
-
         viewModelScope.launch(Dispatchers.IO) {
-            val newPath = storageManager.moveFileToCategory(document.internalPath, newCategory)
-            if (newPath != null) {
+            val newInternalPath = storageManager.moveFileToCategory(document.internalPath, newCategory)
+            if (newInternalPath != null) {
                 val updated = document.copy(
                     category = newCategory,
-                    internalPath = newPath,
+                    internalPath = newInternalPath,
                     lastModified = System.currentTimeMillis()
                 )
                 repository.updateDocument(updated)
-                withContext(Dispatchers.Main) {
-                    _statusMessage.value = "Moved to $newCategory"
-                }
+            }
+        }
+    }
+
+    fun renameDocument(document: DocumentEntity, newDisplayName: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = repository.renameDocument(document.id, newDisplayName)
+            if (result.isFailure) {
+                _statusMessage.value = result.exceptionOrNull()?.message ?: "Rename failed."
             } else {
-                withContext(Dispatchers.Main) {
-                    _statusMessage.value = "Failed to update category"
-                }
+                _statusMessage.value = "Renamed to '$newDisplayName'."
             }
         }
     }
@@ -441,9 +589,6 @@ class DocumentViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch(Dispatchers.IO) {
             storageManager.deleteAppPrivateFile(document.internalPath)
             repository.deleteDocument(document)
-            withContext(Dispatchers.Main) {
-                _statusMessage.value = "Removed document from app"
-            }
         }
     }
 

@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
@@ -51,6 +52,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        try {
+            android.system.Os.chmod(applicationInfo.dataDir, 448) // 0700
+        } catch (_: Exception) {}
+
         enableEdgeToEdge()
 
         setContent {
@@ -157,33 +162,28 @@ fun WelcomeScreen(
     ) {
         Text(
             text = "📄",
-            fontSize = 64.sp
+            fontSize = 72.sp
         )
-
-        Spacer(modifier = Modifier.height(20.dp))
-
+        Spacer(modifier = Modifier.height(24.dp))
         Text(
-            text = "PERSONAL DOCUMENT\nFINDER",
+            text = "Personal Document Finder",
             fontSize = 28.sp,
             fontWeight = FontWeight.Bold,
             textAlign = TextAlign.Center
         )
-
         Spacer(modifier = Modifier.height(12.dp))
-
         Text(
-            text = "Find, organize, and search your documents quickly with on-device privacy.",
+            text = "Easily find, organize, and view all your personal documents on this device.",
             fontSize = 16.sp,
+            color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center
         )
-
-        Spacer(modifier = Modifier.height(32.dp))
-
-        Button(onClick = onGetStarted) {
-            Text(
-                text = "Get Started",
-                fontSize = 16.sp
-            )
+        Spacer(modifier = Modifier.height(40.dp))
+        Button(
+            onClick = onGetStarted,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Get Started")
         }
     }
 }

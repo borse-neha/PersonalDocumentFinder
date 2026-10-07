@@ -1,11 +1,12 @@
 package com.example.personaldocumentfinder.domain
 
 import android.content.Context
+import android.media.MediaScannerConnection
 import android.net.Uri
+import android.os.Environment
 import android.provider.OpenableColumns
 import java.io.File
 import java.io.FileOutputStream
-import java.io.InputStream
 import java.security.MessageDigest
 
 open class StorageManager(private val context: Context) {
@@ -41,14 +42,50 @@ open class StorageManager(private val context: Context) {
         }
     }
 
-    fun copyFileToAppPrivateStorage(uri: Uri, category: String, customFileName: String? = null): CopyResult? {
+    open fun getOrganizedBaseDir(): File {
+        return try {
+            val documentsPublicDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS)
+            val baseAppDir = File(documentsPublicDir, "Personal Document Finder")
+            if (baseAppDir.exists() || baseAppDir.mkdirs()) {
+                baseAppDir
+            } else {
+                getFallbackDir()
+            }
+        } catch (_: Throwable) {
+            getFallbackDir()
+        }
+    }
+
+    private fun getFallbackDir(): File {
+        return try {
+            val extFiles = context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)
+            if (extFiles != null) {
+                val dir = File(extFiles, "Personal Document Finder")
+                if (dir.exists() || dir.mkdirs()) return dir
+            }
+            val internal = File(context.filesDir, "Documents/Personal Document Finder")
+            if (!internal.exists()) internal.mkdirs()
+            internal
+        } catch (_: Throwable) {
+            val internal = File(context.filesDir, "Documents/Personal Document Finder")
+            if (!internal.exists()) internal.mkdirs()
+            internal
+        }
+    }
+
+    fun getCategoryDir(category: String): File {
+        val sanitizedCategory = sanitizeCategory(category)
+        val dir = File(getOrganizedBaseDir(), sanitizedCategory)
+        if (!dir.exists()) {
+            dir.mkdirs()
+        }
+        return dir
+    }
+
+    fun copyFileToOrganizedStorage(uri: Uri, category: String, customFileName: String? = null): CopyResult? {
         return try {
             val originalName = customFileName ?: getFileNameFromUri(uri)
-            val sanitizedCategory = sanitizeCategory(category)
-            val categoryDir = File(context.filesDir, sanitizedCategory)
-            if (!categoryDir.exists()) {
-                categoryDir.mkdirs()
-            }
+            val categoryDir = getCategoryDir(category)
 
             val storedFileName = generateUniqueFileName(categoryDir, originalName)
             val destFile = File(categoryDir, storedFileName)
@@ -72,6 +109,11 @@ open class StorageManager(private val context: Context) {
             val contentHash = hashBytes.joinToString("") { "%02x".format(it) }
             val mimeType = context.contentResolver.getType(uri) ?: getMimeTypeFromExtension(destFile.extension)
 
+            // Notify MediaScanner so the organized file is immediately discoverable in phone's Files app
+            try {
+                MediaScannerConnection.scanFile(context, arrayOf(destFile.absolutePath), arrayOf(mimeType), null)
+            } catch (_: Throwable) {}
+
             CopyResult(
                 storedFileName = storedFileName,
                 internalPath = destFile.absolutePath,
@@ -85,24 +127,35 @@ open class StorageManager(private val context: Context) {
         }
     }
 
+    // For backwards compatibility with existing callers
+    fun copyFileToAppPrivateStorage(uri: Uri, category: String, customFileName: String? = null): CopyResult? {
+        return copyFileToOrganizedStorage(uri, category, customFileName)
+    }
+
     fun moveFileToCategory(internalPath: String, newCategory: String): String? {
         return try {
             val currentFile = File(internalPath)
             if (!currentFile.exists()) return null
 
-            val sanitizedCategory = sanitizeCategory(newCategory)
-            val newCategoryDir = File(context.filesDir, sanitizedCategory)
-            if (!newCategoryDir.exists()) {
-                newCategoryDir.mkdirs()
-            }
+            val newCategoryDir = getCategoryDir(newCategory)
+            val newStoredFileName = generateUniqueFileName(newCategoryDir, currentFile.name)
+            val newFile = File(newCategoryDir, newStoredFileName)
 
-            val newFile = File(newCategoryDir, currentFile.name)
-            if (currentFile.renameTo(newFile)) {
-                newFile.absolutePath
+            val success = if (currentFile.renameTo(newFile)) {
+                true
             } else {
                 currentFile.copyTo(newFile, overwrite = true)
                 currentFile.delete()
+                true
+            }
+
+            if (success) {
+                try {
+                    MediaScannerConnection.scanFile(context, arrayOf(newFile.absolutePath, currentFile.absolutePath), null, null)
+                } catch (_: Throwable) {}
                 newFile.absolutePath
+            } else {
+                null
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -114,7 +167,11 @@ open class StorageManager(private val context: Context) {
         return try {
             val file = File(internalPath)
             if (file.exists()) {
-                file.delete()
+                val deleted = file.delete()
+                try {
+                    MediaScannerConnection.scanFile(context, arrayOf(internalPath), null, null)
+                } catch (_: Throwable) {}
+                deleted
             } else {
                 true
             }
@@ -140,7 +197,7 @@ open class StorageManager(private val context: Context) {
             }
         }
 
-        calculateDir(context.filesDir)
+        calculateDir(getOrganizedBaseDir())
         return StorageStats(totalBytes = totalBytes, fileCount = fileCount)
     }
 
@@ -163,7 +220,11 @@ open class StorageManager(private val context: Context) {
     }
 
     private fun sanitizeCategory(category: String): String {
-        return category.replace(Regex("[^a-zA-Z0-9_-]"), "_")
+        return when (category.trim()) {
+            "College", "Identity", "Finance", "Office", "Vehicle", "Personal" -> category.trim()
+            "Other", "Other Documents" -> "Other Documents"
+            else -> category.trim().replace(Regex("[^a-zA-Z0-9_ -]"), "_")
+        }
     }
 
     private fun generateUniqueFileName(dir: File, originalName: String): String {
