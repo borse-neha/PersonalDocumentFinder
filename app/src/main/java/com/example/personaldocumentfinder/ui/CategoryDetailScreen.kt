@@ -177,7 +177,7 @@ fun CategoryDetailScreen(
         AlertDialog(
             onDismissRequest = { documentToDelete = null },
             title = { Text("Remove Document") },
-            text = { Text("Are you sure you want to remove '${doc.effectiveDisplayName}' from Personal Document Finder?") },
+            text = { Text("Are you sure you want to remove '${doc.effectiveDisplayName}' from Personal Document Finder? Your original external file will remain safe and untouched.") },
             confirmButton = {
                 TextButton(
                     onClick = {

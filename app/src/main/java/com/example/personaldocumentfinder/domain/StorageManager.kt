@@ -105,6 +105,11 @@ open class StorageManager(private val context: Context) {
                 }
             } ?: return null
 
+            if (fileSize <= 0L) {
+                if (destFile.exists()) destFile.delete()
+                return null
+            }
+
             val hashBytes = digest.digest()
             val contentHash = hashBytes.joinToString("") { "%02x".format(it) }
             val mimeType = context.contentResolver.getType(uri) ?: getMimeTypeFromExtension(destFile.extension)
@@ -138,6 +143,10 @@ open class StorageManager(private val context: Context) {
             if (!currentFile.exists()) return null
 
             val newCategoryDir = getCategoryDir(newCategory)
+            if (currentFile.parentFile?.canonicalPath == newCategoryDir.canonicalPath) {
+                return currentFile.absolutePath
+            }
+
             val newStoredFileName = generateUniqueFileName(newCategoryDir, currentFile.name)
             val newFile = File(newCategoryDir, newStoredFileName)
 
@@ -166,15 +175,30 @@ open class StorageManager(private val context: Context) {
     fun deleteAppPrivateFile(internalPath: String): Boolean {
         return try {
             val file = File(internalPath)
-            if (file.exists()) {
-                val deleted = file.delete()
-                try {
-                    MediaScannerConnection.scanFile(context, arrayOf(internalPath), null, null)
-                } catch (_: Throwable) {}
-                deleted
-            } else {
-                true
+            if (!file.exists()) return true
+
+            // Strict boundary safety check:
+            // Ensure the file is strictly inside the app's organized storage or internal files dir.
+            // Under NO circumstance should any external user directory outside our managed folders be deleted!
+            val canonicalPath = file.canonicalPath
+            val baseOrganized = getOrganizedBaseDir().canonicalPath
+            val internalFiles = context.filesDir.canonicalPath
+            val extFiles = context.getExternalFilesDir(null)?.canonicalPath
+
+            val isAllowed = canonicalPath.startsWith(baseOrganized) ||
+                    canonicalPath.startsWith(internalFiles) ||
+                    (extFiles != null && canonicalPath.startsWith(extFiles))
+
+            if (!isAllowed) {
+                // Reject deletion outside app boundary to protect external user data!
+                return false
             }
+
+            val deleted = file.delete()
+            try {
+                MediaScannerConnection.scanFile(context, arrayOf(internalPath), null, null)
+            } catch (_: Throwable) {}
+            deleted
         } catch (e: Exception) {
             e.printStackTrace()
             false

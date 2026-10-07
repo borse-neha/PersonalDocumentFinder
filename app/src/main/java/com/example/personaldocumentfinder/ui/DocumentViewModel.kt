@@ -243,6 +243,19 @@ class DocumentViewModel(application: Application) : AndroidViewModel(application
         _importState.value = ImportState.Idle
     }
 
+    fun removeCandidateFromQueue(index: Int) {
+        val currentList = _candidateQueue.value.toMutableList()
+        if (index in currentList.indices) {
+            currentList.removeAt(index)
+            _candidateQueue.value = currentList
+            if (currentList.isEmpty()) {
+                _importState.value = ImportState.Idle
+            } else {
+                _importState.value = ImportState.ReviewNeeded(currentList.size)
+            }
+        }
+    }
+
     fun getCategoryDocuments(category: String): StateFlow<List<DocumentEntity>> {
         return allDocuments
             .map { docs -> docs.filter { it.category == category } }
@@ -361,8 +374,13 @@ class DocumentViewModel(application: Application) : AndroidViewModel(application
                                 contentHash = copyResult.contentHash
                             )
 
-                            repository.insertDocument(documentEntity)
-                            importedCount++
+                            try {
+                                repository.insertDocument(documentEntity)
+                                importedCount++
+                            } catch (e: Exception) {
+                                storageManager.deleteAppPrivateFile(copyResult.internalPath)
+                                e.printStackTrace()
+                            }
                         }
                     } else if (classification.isDocument && (classification.categoryConfidence >= 0.45f || classification.documentTypeConfidence >= 0.45f)) {
                         // Candidate with probable evidence goes into Review Queue
@@ -408,8 +426,13 @@ class DocumentViewModel(application: Application) : AndroidViewModel(application
                                 isReviewed = true,
                                 contentHash = copyResult.contentHash
                             )
-                            repository.insertDocument(documentEntity)
-                            importedCount++
+                            try {
+                                repository.insertDocument(documentEntity)
+                                importedCount++
+                            } catch (e: Exception) {
+                                storageManager.deleteAppPrivateFile(copyResult.internalPath)
+                                e.printStackTrace()
+                            }
                         }
                     } else {
                         skippedNonDocsCount++
@@ -460,15 +483,11 @@ class DocumentViewModel(application: Application) : AndroidViewModel(application
                 val ocrText = OcrAnalyzer.extractText(getApplication(), uri, mimeType)
                 val classification = DocumentClassifier.classify(ocrText, originalName, mimeType)
 
-                val copyResult = storageManager.copyFileToOrganizedStorage(uri, classification.category, originalName)
-                var isDuplicate = false
-                if (copyResult != null) {
-                    val existingDuplicate = repository.getDocumentByHash(copyResult.contentHash)
-                    if (existingDuplicate != null) {
-                        isDuplicate = true
-                    }
-                    storageManager.deleteAppPrivateFile(copyResult.internalPath)
-                }
+                // Calculate SHA-256 hash directly via stream without copying to disk
+                val contentHash = storageManager.calculateContentHash(uri)
+                val isDuplicate = if (contentHash != null) {
+                    repository.getDocumentByHash(contentHash) != null
+                } else false
 
                 candidates.add(
                     CandidateImportItem(
@@ -497,7 +516,7 @@ class DocumentViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    fun confirmCandidateImports(candidates: List<CandidateImportItem>, deleteOriginals: Boolean = false) {
+    fun confirmCandidateImports(candidates: List<CandidateImportItem>) {
         if (candidates.isEmpty()) {
             clearCandidateQueue()
             return
@@ -542,8 +561,13 @@ class DocumentViewModel(application: Application) : AndroidViewModel(application
                         contentHash = copyResult.contentHash
                     )
 
-                    repository.insertDocument(documentEntity)
-                    importedCount++
+                    try {
+                        repository.insertDocument(documentEntity)
+                        importedCount++
+                    } catch (e: Exception) {
+                        storageManager.deleteAppPrivateFile(copyResult.internalPath)
+                        e.printStackTrace()
+                    }
                 }
             }
 

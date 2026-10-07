@@ -186,4 +186,43 @@ class DocumentStorageTest {
         val unimported = candidateRepository.filterUnimportedCandidates(storageManager, listOf(candidate))
         assertTrue("Duplicate candidate must be filtered out to prevent duplicate copies", unimported.isEmpty())
     }
+
+    // 35. Zero-byte files are not copied or stored.
+    @Test
+    fun test35_ZeroByteFileIsNotCopiedOrStored() {
+        val emptyOriginal = createDummySourceFile("Empty_Doc.pdf", "")
+        val uri = Uri.fromFile(emptyOriginal)
+
+        val copyResult = storageManager.copyFileToOrganizedStorage(uri, "Other Documents", "Empty_Doc.pdf")
+        assertTrue("Zero-byte file must not be copied", copyResult == null)
+
+        val categoryDir = storageManager.getCategoryDir("Other Documents")
+        val possibleFile = File(categoryDir, "Empty_Doc.pdf")
+        assertFalse("Empty file must not exist in storage", possibleFile.exists())
+    }
+
+    // 36. deleteAppPrivateFile rejects deleting external user files outside app boundary.
+    @Test
+    fun test36_DeleteAppPrivateFileRejectsDeletingExternalUserFiles() {
+        val externalUserFile = createDummySourceFile("External_Photo.jpg", "Precious User Photo Content")
+        assertTrue("Original external user file must exist", externalUserFile.exists())
+
+        // Attempting to delete external user file path directly must fail and not delete the file
+        val deletionResult = storageManager.deleteAppPrivateFile(externalUserFile.absolutePath)
+        assertFalse("Must refuse to delete files outside app boundary", deletionResult)
+        assertTrue("External user file must remain intact", externalUserFile.exists())
+    }
+
+    // 37. Moving file to same category returns existing path without creating copies.
+    @Test
+    fun test37_MoveFileToSameCategoryReturnsExistingPathWithoutDuplication() {
+        val original = createDummySourceFile("Doc_To_Move.pdf", "Content to Move")
+        val uri = Uri.fromFile(original)
+        val copyResult = storageManager.copyFileToOrganizedStorage(uri, "Finance", "Doc_To_Move.pdf")!!
+
+        val initialPath = copyResult.internalPath
+        val sameCategoryPath = storageManager.moveFileToCategory(initialPath, "Finance")
+        assertNotNull(sameCategoryPath)
+        assertEquals("Path must remain identical when moving to the same category", initialPath, sameCategoryPath)
+    }
 }
