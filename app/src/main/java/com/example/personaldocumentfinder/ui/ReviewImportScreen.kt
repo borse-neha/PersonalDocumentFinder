@@ -14,12 +14,12 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -31,18 +31,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.personaldocumentfinder.domain.CandidateImportItem
-import com.example.personaldocumentfinder.domain.ClassificationResult
 
 @Composable
 fun ReviewImportScreen(
     candidates: List<CandidateImportItem>,
     modifier: Modifier = Modifier,
     onCategoryChanged: (index: Int, newCategory: String) -> Unit,
-    onConfirmAll: (deleteOriginals: Boolean) -> Unit,
+    onRemoveCandidate: (index: Int) -> Unit,
+    onConfirmAll: () -> Unit,
     onCancel: () -> Unit
 ) {
-    var deleteOriginals by remember { mutableStateOf(false) }
-
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -81,6 +79,9 @@ fun ReviewImportScreen(
                     candidate = candidate,
                     onCategorySelected = { newCat ->
                         onCategoryChanged(index, newCat)
+                    },
+                    onDismiss = {
+                        onRemoveCandidate(index)
                     }
                 )
             }
@@ -88,38 +89,21 @@ fun ReviewImportScreen(
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 4.dp)
-        ) {
-            Checkbox(
-                checked = deleteOriginals,
-                onCheckedChange = { deleteOriginals = it }
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            Column {
-                Text(
-                    text = "Delete original external file after copying",
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Text(
-                    text = "Maintains app-private copy while removing public original.",
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        }
+        Text(
+            text = "🛡️ Original files on your device will remain untouched. Clean copies will be organized in Documents.",
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp)
+        )
 
         Spacer(modifier = Modifier.height(8.dp))
 
         Button(
-            onClick = { onConfirmAll(deleteOriginals) },
+            onClick = onConfirmAll,
+            enabled = candidates.isNotEmpty(),
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text("Confirm & Import Selected Documents")
+            Text("Confirm & Import Selected Documents (${candidates.size})")
         }
     }
 }
@@ -127,7 +111,8 @@ fun ReviewImportScreen(
 @Composable
 fun CandidateCard(
     candidate: CandidateImportItem,
-    onCategorySelected: (String) -> Unit
+    onCategorySelected: (String) -> Unit,
+    onDismiss: () -> Unit
 ) {
     var expandedMenu by remember { mutableStateOf(false) }
 
@@ -200,25 +185,30 @@ fun CandidateCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text("Assigned Category:", fontSize = 13.sp)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Category: ", fontSize = 13.sp)
+                    OutlinedButton(onClick = { expandedMenu = true }) {
+                        Text("${candidate.selectedCategory} ▾", fontSize = 13.sp)
+                    }
 
-                OutlinedButton(onClick = { expandedMenu = true }) {
-                    Text("${candidate.selectedCategory} ▾", fontSize = 13.sp)
+                    DropdownMenu(
+                        expanded = expandedMenu,
+                        onDismissRequest = { expandedMenu = false }
+                    ) {
+                        ALL_CATEGORIES.forEach { category ->
+                            DropdownMenuItem(
+                                text = { Text(category) },
+                                onClick = {
+                                    onCategorySelected(category)
+                                    expandedMenu = false
+                                }
+                            )
+                        }
+                    }
                 }
 
-                DropdownMenu(
-                    expanded = expandedMenu,
-                    onDismissRequest = { expandedMenu = false }
-                ) {
-                    ALL_CATEGORIES.forEach { category ->
-                        DropdownMenuItem(
-                            text = { Text(category) },
-                            onClick = {
-                                onCategorySelected(category)
-                                expandedMenu = false
-                            }
-                        )
-                    }
+                TextButton(onClick = onDismiss) {
+                    Text("Exclude", color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
                 }
             }
         }

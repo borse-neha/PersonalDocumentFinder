@@ -2,6 +2,7 @@ package com.example.personaldocumentfinder
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
@@ -72,6 +73,14 @@ class MainActivity : ComponentActivity() {
                 val importState by viewModel.importState.collectAsState()
                 val candidateQueue by viewModel.candidateQueue.collectAsState()
 
+                // Intercept back gestures when on sub-screens so the app returns to Home rather than exiting
+                BackHandler(enabled = currentScreen !is Screen.Home && currentScreen !is Screen.Welcome) {
+                    if (currentScreen is Screen.ReviewImport) {
+                        viewModel.clearCandidateQueue()
+                    }
+                    currentScreen = Screen.Home
+                }
+
                 // Auto navigate to ReviewImport when scan analysis completes
                 if (importState is DocumentViewModel.ImportState.ReviewNeeded && currentScreen !is Screen.ReviewImport) {
                     currentScreen = Screen.ReviewImport
@@ -124,8 +133,11 @@ class MainActivity : ComponentActivity() {
                                 onCategoryChanged = { index, newCat ->
                                     viewModel.updateCandidateCategory(index, newCat)
                                 },
-                                onConfirmAll = { deleteOriginals ->
-                                    viewModel.confirmCandidateImports(candidateQueue, deleteOriginals)
+                                onRemoveCandidate = { index ->
+                                    viewModel.removeCandidateFromQueue(index)
+                                },
+                                onConfirmAll = {
+                                    viewModel.confirmCandidateImports(candidateQueue)
                                     currentScreen = Screen.Home
                                 },
                                 onCancel = {
