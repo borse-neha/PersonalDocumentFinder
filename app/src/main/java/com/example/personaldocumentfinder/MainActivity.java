@@ -76,13 +76,66 @@ public class MainActivity extends AppCompatActivity {
 
     private ActivityResultLauncher<String[]> filePickerLauncher;
 
+    // Adapters
+    private CategoryAdapter homeCategoryAdapter;
+    private DocumentAdapter homeDocAdapter;
+    private DocumentAdapter homeMentionAdapter;
+    private DocumentAdapter categoryDetailAdapter;
+    private DocumentAdapter filesDocAdapter;
+    private DocumentAdapter filesMentionAdapter;
+    private CandidateAdapter reviewAdapter;
+
+    // Home views
+    private LinearLayout homeLayoutNormalContent;
+    private MaterialCardView homeCardScanProgress;
+    private TextView homeTvScanProgress;
+    private TextView homeTvDocsSectionTitle;
+    private MaterialCardView homeCardLoadingDocs;
+    private TextView homeTvLoadingText;
+    private MaterialCardView homeCardEmptyDocs;
+    private TextView homeTvEmptyTitle;
+    private TextView homeTvEmptySubtitle;
+    private RecyclerView homeRvDocuments;
+    private TextView homeTvMentionHeader;
+    private RecyclerView homeRvMentionDocuments;
+    private Button homeBtnMyDocuments;
+
+    // Category detail views
+    private TextView categoryDetailTvSubtitle;
+    private LinearLayout categoryDetailLayoutLoading;
+    private TextView categoryDetailTvLoadingText;
+    private LinearLayout categoryDetailLayoutEmpty;
+    private TextView categoryDetailTvEmptyTitle;
+    private RecyclerView categoryDetailRvDocs;
+
+    // Files views
+    private LinearLayout filesLayoutProgress;
+    private TextView filesTvProgress;
+    private TextView filesTvCountLabel;
+    private LinearLayout filesLayoutLoading;
+    private TextView filesTvLoadingText;
+    private LinearLayout filesLayoutEmpty;
+    private TextView filesTvEmptyTitle;
+    private RecyclerView filesRvDocs;
+    private TextView filesTvMentionHeader;
+    private RecyclerView filesRvMentionDocs;
+
+    // Review views
+    private TextView reviewTvSubtitle;
+    private Button reviewBtnConfirmAll;
+
+    // Settings views
+    private TextView settingsTvStorageUsed;
+    private TextView settingsTvTotalDocs;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
         try {
             Os.chmod(getApplicationInfo().dataDir, 448); // 0700
-        } catch (Exception ignored) {}
+        } catch (Exception ignored) {
+        }
 
         setContentView(R.layout.activity_main);
 
@@ -101,11 +154,86 @@ public class MainActivity extends AppCompatActivity {
                 new ActivityResultContracts.OpenMultipleDocuments(),
                 uris -> {
                     if (uris != null && !uris.isEmpty()) {
-                        viewModel.scanAndAnalyzeDocuments(uris);
+                        viewModel.importDocumentsFromUris(uris);
                     }
-                }
-        );
+                });
 
+        // Initialize adapters once
+        homeCategoryAdapter = new CategoryAdapter(categoryName -> navigateTo(ScreenType.CATEGORY_DETAIL, categoryName));
+        DocumentAdapter.DocumentActionListener docListener = createDocumentActionListener();
+        homeDocAdapter = new DocumentAdapter(docListener);
+        homeMentionAdapter = new DocumentAdapter(docListener);
+
+        categoryDetailAdapter = new DocumentAdapter(docListener);
+
+        filesDocAdapter = new DocumentAdapter(docListener);
+        filesMentionAdapter = new DocumentAdapter(docListener);
+
+        reviewAdapter = new CandidateAdapter(new CandidateAdapter.CandidateActionListener() {
+            @Override
+            public void onCategoryChanged(int position, String newCategory) {
+                viewModel.updateCandidateCategory(position, newCategory);
+            }
+
+            @Override
+            public void onRemoveCandidate(int position) {
+                viewModel.removeCandidateFromQueue(position);
+            }
+        });
+
+        // Setup Centralized Observers once
+        setupObservers();
+
+        // Back gesture handling
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                if (currentScreen != ScreenType.HOME && currentScreen != ScreenType.WELCOME) {
+                    if (currentScreen == ScreenType.REVIEW_IMPORT) {
+                        viewModel.clearCandidateQueue();
+                    }
+                    navigateTo(ScreenType.HOME, null);
+                } else {
+                    setEnabled(false);
+                    getOnBackPressedDispatcher().onBackPressed();
+                }
+            }
+        });
+
+        navigateTo(ScreenType.WELCOME, null);
+        handleIncomingIntent(getIntent());
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleIncomingIntent(intent);
+    }
+
+    private void handleIncomingIntent(Intent intent) {
+        if (intent == null)
+            return;
+        String action = intent.getAction();
+        if (Intent.ACTION_VIEW.equals(action) || Intent.ACTION_SEND.equals(action)
+                || "com.example.personaldocumentfinder.IMPORT_URI".equals(action)) {
+            Uri data = intent.getData();
+            if (data == null && intent.hasExtra(Intent.EXTRA_STREAM)) {
+                data = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+            }
+            if (data == null && intent.hasExtra("import_uri")) {
+                String uriStr = intent.getStringExtra("import_uri");
+                if (uriStr != null)
+                    data = Uri.parse(uriStr);
+            }
+            if (data != null) {
+                viewModel.importDocumentsFromUris(Collections.singletonList(data));
+                navigateTo(ScreenType.MY_DOCUMENTS, null);
+            }
+        }
+    }
+
+    private void setupObservers() {
         // Theme Observer
         viewModel.getThemeState().observe(this, theme -> {
             if ("Light".equalsIgnoreCase(theme)) {
@@ -125,7 +253,7 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
-        // Import State Observer (for Auto navigation to ReviewImport and Permission Dialog)
+        // Import State Observer
         viewModel.getImportState().observe(this, state -> {
             if (state instanceof DocumentViewModel.ImportState.ReviewNeeded) {
                 if (currentScreen != ScreenType.REVIEW_IMPORT) {
@@ -134,31 +262,393 @@ public class MainActivity extends AppCompatActivity {
             } else if (state instanceof DocumentViewModel.ImportState.PermissionRequired) {
                 showPermissionRationaleDialog();
             }
-        });
 
-        // Back gesture handling
-        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
-            @Override
-            public void handleOnBackPressed() {
-                if (currentScreen != ScreenType.HOME && currentScreen != ScreenType.WELCOME) {
-                    if (currentScreen == ScreenType.REVIEW_IMPORT) {
-                        viewModel.clearCandidateQueue();
-                    }
-                    navigateTo(ScreenType.HOME, null);
-                } else {
-                    setEnabled(false);
-                    getOnBackPressedDispatcher().onBackPressed();
-                }
+            // Update scan progress UI on Home or Files
+            String progressText = "";
+            boolean isProcessing = state instanceof DocumentViewModel.ImportState.Processing;
+            if (isProcessing) {
+                progressText = ((DocumentViewModel.ImportState.Processing) state).getProgress();
+            }
+
+            if (currentScreen == ScreenType.HOME && homeCardScanProgress != null && homeTvScanProgress != null) {
+                homeCardScanProgress.setVisibility(isProcessing ? View.VISIBLE : View.GONE);
+                homeTvScanProgress.setText(progressText);
+            } else if (currentScreen == ScreenType.MY_DOCUMENTS && filesLayoutProgress != null
+                    && filesTvProgress != null) {
+                filesLayoutProgress.setVisibility(isProcessing ? View.VISIBLE : View.GONE);
+                filesTvProgress.setText(progressText);
             }
         });
 
-        navigateTo(ScreenType.WELCOME, null);
+        // Category counts observer
+        viewModel.getCategoryCounts().observe(this, counts -> {
+            boolean loaded = Boolean.TRUE.equals(viewModel.getIsDatabaseLoaded().getValue());
+            if (homeCategoryAdapter != null) {
+                homeCategoryAdapter.setCategoryCounts(counts, loaded);
+            }
+        });
+
+        // Database loaded / All documents / Search query / Ranked search results
+        // observers
+        Observer<Object> dataObserver = o -> {
+            updateCurrentScreenUI();
+        };
+
+        viewModel.getIsDatabaseLoaded().observe(this, dataObserver);
+        viewModel.getAllDocuments().observe(this, dataObserver);
+        viewModel.getSearchQuery().observe(this, dataObserver);
+        viewModel.getIsSearchLoading().observe(this, dataObserver);
+        viewModel.getRankedSearchResults().observe(this, dataObserver);
+        viewModel.getTotalCount().observe(this, dataObserver);
+        viewModel.getCandidateQueue().observe(this, dataObserver);
+    }
+
+    private void updateCurrentScreenUI() {
+        boolean isLoaded = Boolean.TRUE.equals(viewModel.getIsDatabaseLoaded().getValue());
+        List<DocumentEntity> allDocs = viewModel.getAllDocuments().getValue();
+        int totalCount = allDocs != null ? allDocs.size() : 0;
+
+        switch (currentScreen) {
+            case HOME:
+                if (homeBtnMyDocuments != null) {
+                    homeBtnMyDocuments
+                            .setText(isLoaded ? "📁 My Documents (" + totalCount + ")" : "📁 My Documents (...)");
+                }
+                if (homeCategoryAdapter != null) {
+                    homeCategoryAdapter.setCategoryCounts(viewModel.getCategoryCounts().getValue(), isLoaded);
+                }
+                updateHomeScreenContent(isLoaded, allDocs);
+                break;
+
+            case MY_DOCUMENTS:
+                if (filesTvCountLabel != null) {
+                    String q = viewModel.getSearchQuery().getValue();
+                    boolean isSearching = q != null && !q.trim().isEmpty();
+                    RankedSearchResults ranked = viewModel.getRankedSearchResults().getValue();
+                    int totalMatches = ranked != null
+                            ? (ranked.getPrimaryMatches().size() + ranked.getMentionMatches().size())
+                            : 0;
+                    if (isLoaded) {
+                        if (isSearching) {
+                            filesTvCountLabel.setText(totalMatches + " result(s) found");
+                        } else {
+                            filesTvCountLabel.setText(totalCount + " document(s) stored");
+                        }
+                    } else {
+                        filesTvCountLabel.setText("— document(s) stored");
+                    }
+                }
+                updateFilesScreenContent(isLoaded, allDocs);
+                break;
+
+            case CATEGORY_DETAIL:
+                if (currentCategoryDetail != null && categoryDetailAdapter != null
+                        && categoryDetailTvSubtitle != null) {
+                    List<DocumentEntity> catDocs = new ArrayList<>();
+                    if (allDocs != null) {
+                        for (DocumentEntity d : allDocs) {
+                            if (d != null && currentCategoryDetail.equalsIgnoreCase(d.getCategory())) {
+                                catDocs.add(d);
+                            }
+                        }
+                    }
+                    if (!isLoaded) {
+                        categoryDetailTvSubtitle.setText("— document(s)");
+                        if (categoryDetailLayoutLoading != null)
+                            categoryDetailLayoutLoading.setVisibility(View.VISIBLE);
+                        if (categoryDetailLayoutEmpty != null)
+                            categoryDetailLayoutEmpty.setVisibility(View.GONE);
+                        if (categoryDetailRvDocs != null)
+                            categoryDetailRvDocs.setVisibility(View.GONE);
+                    } else if (catDocs.isEmpty()) {
+                        categoryDetailTvSubtitle.setText("0 document(s)");
+                        if (categoryDetailLayoutLoading != null)
+                            categoryDetailLayoutLoading.setVisibility(View.GONE);
+                        if (categoryDetailLayoutEmpty != null)
+                            categoryDetailLayoutEmpty.setVisibility(View.VISIBLE);
+                        if (categoryDetailRvDocs != null)
+                            categoryDetailRvDocs.setVisibility(View.GONE);
+                    } else {
+                        categoryDetailTvSubtitle.setText(catDocs.size() + " document(s)");
+                        if (categoryDetailLayoutLoading != null)
+                            categoryDetailLayoutLoading.setVisibility(View.GONE);
+                        if (categoryDetailLayoutEmpty != null)
+                            categoryDetailLayoutEmpty.setVisibility(View.GONE);
+                        if (categoryDetailRvDocs != null)
+                            categoryDetailRvDocs.setVisibility(View.VISIBLE);
+                        categoryDetailAdapter.setDocuments(catDocs);
+                    }
+                }
+                break;
+
+            case REVIEW_IMPORT: {
+                List<CandidateImportItem> candidates = viewModel.getCandidateQueue().getValue();
+                int reviewTotalCount = candidates != null ? candidates.size() : 0;
+                int duplicateCount = 0;
+                if (candidates != null) {
+                    for (CandidateImportItem c : candidates) {
+                        if (c != null && c.isDuplicate())
+                            duplicateCount++;
+                    }
+                }
+                int importableCount = reviewTotalCount - duplicateCount;
+                if (reviewTvSubtitle != null) {
+                    if (duplicateCount > 0) {
+                        reviewTvSubtitle.setText(reviewTotalCount + " candidate(s) analyzed (" + duplicateCount
+                                + " duplicate(s) skipped)");
+                    } else {
+                        reviewTvSubtitle.setText(reviewTotalCount + " candidate(s) analyzed");
+                    }
+                }
+                if (reviewBtnConfirmAll != null) {
+                    reviewBtnConfirmAll.setText("Confirm & Import Selected Documents (" + importableCount + ")");
+                    reviewBtnConfirmAll.setEnabled(importableCount > 0);
+                }
+                if (reviewAdapter != null) {
+                    reviewAdapter.setCandidates(candidates);
+                }
+                break;
+            }
+
+            case SETTINGS:
+                if (settingsTvTotalDocs != null && settingsTvStorageUsed != null) {
+                    settingsTvTotalDocs.setText(totalCount + " document(s)");
+                    StorageManager.StorageStats stats = viewModel.getStorageManager().getStorageStats();
+                    settingsTvStorageUsed.setText(Formatter.formatShortFileSize(this, stats.getTotalBytes()));
+                }
+                break;
+
+            default:
+                break;
+        }
+    }
+
+    private void updateHomeScreenContent(boolean isLoaded, List<DocumentEntity> allDocs) {
+        if (homeLayoutNormalContent == null)
+            return;
+
+        String q = viewModel.getSearchQuery().getValue();
+        boolean isSearching = q != null && !q.trim().isEmpty();
+        boolean isSearchLoading = Boolean.TRUE.equals(viewModel.getIsSearchLoading().getValue());
+        RankedSearchResults ranked = viewModel.getRankedSearchResults().getValue();
+
+        if (isSearching) {
+            homeLayoutNormalContent.setVisibility(View.GONE);
+            if (homeTvDocsSectionTitle != null)
+                homeTvDocsSectionTitle.setText("Search Results");
+
+            if (isSearchLoading) {
+                if (homeCardLoadingDocs != null) {
+                    homeCardLoadingDocs.setVisibility(View.VISIBLE);
+                    homeTvLoadingText.setText("Searching documents...");
+                }
+                if (homeCardEmptyDocs != null)
+                    homeCardEmptyDocs.setVisibility(View.GONE);
+                if (homeRvDocuments != null)
+                    homeRvDocuments.setVisibility(View.GONE);
+                if (homeTvMentionHeader != null)
+                    homeTvMentionHeader.setVisibility(View.GONE);
+                if (homeRvMentionDocuments != null)
+                    homeRvMentionDocuments.setVisibility(View.GONE);
+            } else if (ranked == null
+                    || (ranked.getPrimaryMatches().isEmpty() && ranked.getMentionMatches().isEmpty())) {
+                if (homeCardLoadingDocs != null)
+                    homeCardLoadingDocs.setVisibility(View.GONE);
+                if (homeCardEmptyDocs != null) {
+                    homeCardEmptyDocs.setVisibility(View.VISIBLE);
+                    homeTvEmptyTitle.setText("No matching documents found");
+                    homeTvEmptySubtitle.setText("Try adjusting search terms or scanning your device.");
+                }
+                if (homeRvDocuments != null)
+                    homeRvDocuments.setVisibility(View.GONE);
+                if (homeTvMentionHeader != null)
+                    homeTvMentionHeader.setVisibility(View.GONE);
+                if (homeRvMentionDocuments != null)
+                    homeRvMentionDocuments.setVisibility(View.GONE);
+            } else {
+                if (homeCardLoadingDocs != null)
+                    homeCardLoadingDocs.setVisibility(View.GONE);
+                if (homeCardEmptyDocs != null)
+                    homeCardEmptyDocs.setVisibility(View.GONE);
+
+                if (homeRvDocuments != null) {
+                    homeRvDocuments.setVisibility(View.VISIBLE);
+                    homeDocAdapter.setDocuments(ranked.getPrimaryMatches());
+                }
+
+                if (!ranked.getMentionMatches().isEmpty()) {
+                    if (homeTvMentionHeader != null) {
+                        homeTvMentionHeader.setVisibility(View.VISIBLE);
+                        homeTvMentionHeader.setText(ranked.getPrimaryMatches().isEmpty()
+                                ? "Documents mentioning \"" + q + "\""
+                                : "Other documents mentioning \"" + q + "\"");
+                    }
+                    if (homeRvMentionDocuments != null) {
+                        homeRvMentionDocuments.setVisibility(View.VISIBLE);
+                        homeMentionAdapter.setDocuments(ranked.getMentionMatches());
+                    }
+                } else {
+                    if (homeTvMentionHeader != null)
+                        homeTvMentionHeader.setVisibility(View.GONE);
+                    if (homeRvMentionDocuments != null)
+                        homeRvMentionDocuments.setVisibility(View.GONE);
+                }
+            }
+        } else {
+            homeLayoutNormalContent.setVisibility(View.VISIBLE);
+            if (homeTvDocsSectionTitle != null)
+                homeTvDocsSectionTitle.setText("Recent Documents");
+            if (homeTvMentionHeader != null)
+                homeTvMentionHeader.setVisibility(View.GONE);
+            if (homeRvMentionDocuments != null)
+                homeRvMentionDocuments.setVisibility(View.GONE);
+
+            if (!isLoaded) {
+                if (homeCardLoadingDocs != null) {
+                    homeCardLoadingDocs.setVisibility(View.VISIBLE);
+                    homeTvLoadingText.setText("Loading documents...");
+                }
+                if (homeCardEmptyDocs != null)
+                    homeCardEmptyDocs.setVisibility(View.GONE);
+                if (homeRvDocuments != null)
+                    homeRvDocuments.setVisibility(View.GONE);
+            } else if (allDocs == null || allDocs.isEmpty()) {
+                if (homeCardLoadingDocs != null)
+                    homeCardLoadingDocs.setVisibility(View.GONE);
+                if (homeCardEmptyDocs != null) {
+                    homeCardEmptyDocs.setVisibility(View.VISIBLE);
+                    homeTvEmptyTitle.setText("No documents imported yet");
+                    homeTvEmptySubtitle.setText(
+                            "Tap 'Scan Device' above to search external folders, or 'Add Files' to select manually.");
+                }
+                if (homeRvDocuments != null)
+                    homeRvDocuments.setVisibility(View.GONE);
+            } else {
+                if (homeCardLoadingDocs != null)
+                    homeCardLoadingDocs.setVisibility(View.GONE);
+                if (homeCardEmptyDocs != null)
+                    homeCardEmptyDocs.setVisibility(View.GONE);
+                if (homeRvDocuments != null) {
+                    homeRvDocuments.setVisibility(View.VISIBLE);
+                    List<DocumentEntity> recent = allDocs.size() > 10 ? allDocs.subList(0, 10) : allDocs;
+                    homeDocAdapter.setDocuments(recent);
+                }
+            }
+        }
+    }
+
+    private void updateFilesScreenContent(boolean isLoaded, List<DocumentEntity> allDocs) {
+        if (filesRvDocs == null)
+            return;
+
+        String q = viewModel.getSearchQuery().getValue();
+        boolean isSearching = q != null && !q.trim().isEmpty();
+        boolean isSearchLoading = Boolean.TRUE.equals(viewModel.getIsSearchLoading().getValue());
+        RankedSearchResults ranked = viewModel.getRankedSearchResults().getValue();
+
+        if (isSearching) {
+            if (filesTvMentionHeader != null)
+                filesTvMentionHeader.setVisibility(View.GONE);
+            if (filesRvMentionDocs != null)
+                filesRvMentionDocs.setVisibility(View.GONE);
+
+            if (isSearchLoading) {
+                if (filesLayoutLoading != null) {
+                    filesLayoutLoading.setVisibility(View.VISIBLE);
+                    filesTvLoadingText.setText("Searching documents...");
+                }
+                if (filesLayoutEmpty != null)
+                    filesLayoutEmpty.setVisibility(View.GONE);
+                if (filesRvDocs != null)
+                    filesRvDocs.setVisibility(View.GONE);
+            } else if (ranked == null
+                    || (ranked.getPrimaryMatches().isEmpty() && ranked.getMentionMatches().isEmpty())) {
+                if (filesLayoutLoading != null)
+                    filesLayoutLoading.setVisibility(View.GONE);
+                if (filesLayoutEmpty != null) {
+                    filesLayoutEmpty.setVisibility(View.VISIBLE);
+                    filesTvEmptyTitle.setText("No matching documents found");
+                }
+                if (filesRvDocs != null)
+                    filesRvDocs.setVisibility(View.GONE);
+            } else {
+                if (filesLayoutLoading != null)
+                    filesLayoutLoading.setVisibility(View.GONE);
+                if (filesLayoutEmpty != null)
+                    filesLayoutEmpty.setVisibility(View.GONE);
+                if (filesRvDocs != null) {
+                    filesRvDocs.setVisibility(View.VISIBLE);
+                    filesDocAdapter.setDocuments(ranked.getPrimaryMatches());
+                }
+
+                if (!ranked.getMentionMatches().isEmpty()) {
+                    if (filesTvMentionHeader != null) {
+                        filesTvMentionHeader.setVisibility(View.VISIBLE);
+                        filesTvMentionHeader.setText(ranked.getPrimaryMatches().isEmpty()
+                                ? "Documents mentioning \"" + q + "\""
+                                : "Other documents mentioning \"" + q + "\"");
+                    }
+                    if (filesRvMentionDocs != null) {
+                        filesRvMentionDocs.setVisibility(View.VISIBLE);
+                        filesVirtualMentionAdapterSet(ranked.getMentionMatches());
+                    }
+                } else {
+                    if (filesTvMentionHeader != null)
+                        filesTvMentionHeader.setVisibility(View.GONE);
+                    if (filesRvMentionDocs != null)
+                        filesRvMentionDocs.setVisibility(View.GONE);
+                }
+            }
+        } else {
+            if (filesTvMentionHeader != null)
+                filesTvMentionHeader.setVisibility(View.GONE);
+            if (filesRvMentionDocs != null)
+                filesRvMentionDocs.setVisibility(View.GONE);
+
+            if (!isLoaded) {
+                if (filesLayoutLoading != null) {
+                    filesLayoutLoading.setVisibility(View.VISIBLE);
+                    filesTvLoadingText.setText("Loading documents...");
+                }
+                if (filesLayoutEmpty != null)
+                    filesLayoutEmpty.setVisibility(View.GONE);
+                if (filesRvDocs != null)
+                    filesRvDocs.setVisibility(View.GONE);
+            } else if (allDocs == null || allDocs.isEmpty()) {
+                if (filesLayoutLoading != null)
+                    filesLayoutLoading.setVisibility(View.GONE);
+                if (filesLayoutEmpty != null) {
+                    filesLayoutEmpty.setVisibility(View.VISIBLE);
+                    filesTvEmptyTitle.setText("No documents imported yet");
+                }
+                if (filesRvDocs != null)
+                    filesRvDocs.setVisibility(View.GONE);
+            } else {
+                if (filesLayoutLoading != null)
+                    filesLayoutLoading.setVisibility(View.GONE);
+                if (filesLayoutEmpty != null)
+                    filesLayoutEmpty.setVisibility(View.GONE);
+                if (filesRvDocs != null) {
+                    filesRvDocs.setVisibility(View.VISIBLE);
+                    filesDocAdapter.setDocuments(allDocs);
+                }
+            }
+        }
+    }
+
+    private void filesVirtualMentionAdapterSet(List<DocumentEntity> mentionMatches) {
+        if (filesMentionAdapter != null) {
+            filesMentionAdapter.setDocuments(mentionMatches);
+        }
     }
 
     public void navigateTo(ScreenType screen, String extra) {
         this.currentScreen = screen;
         this.currentCategoryDetail = extra;
         screenContainer.removeAllViews();
+
+        // Clear view references for inactive screens
+        clearScreenViewReferences();
 
         switch (screen) {
             case WELCOME:
@@ -180,6 +670,47 @@ public class MainActivity extends AppCompatActivity {
                 renderSettingsScreen();
                 break;
         }
+        updateCurrentScreenUI();
+    }
+
+    private void clearScreenViewReferences() {
+        homeLayoutNormalContent = null;
+        homeCardScanProgress = null;
+        homeTvScanProgress = null;
+        homeTvDocsSectionTitle = null;
+        homeCardLoadingDocs = null;
+        homeTvLoadingText = null;
+        homeCardEmptyDocs = null;
+        homeTvEmptyTitle = null;
+        homeTvEmptySubtitle = null;
+        homeRvDocuments = null;
+        homeTvMentionHeader = null;
+        homeRvMentionDocuments = null;
+        homeBtnMyDocuments = null;
+
+        categoryDetailTvSubtitle = null;
+        categoryDetailLayoutLoading = null;
+        categoryDetailTvLoadingText = null;
+        categoryDetailLayoutEmpty = null;
+        categoryDetailTvEmptyTitle = null;
+        categoryDetailRvDocs = null;
+
+        filesLayoutProgress = null;
+        filesTvProgress = null;
+        filesTvCountLabel = null;
+        filesLayoutLoading = null;
+        filesTvLoadingText = null;
+        filesLayoutEmpty = null;
+        filesTvEmptyTitle = null;
+        filesRvDocs = null;
+        filesTvMentionHeader = null;
+        filesRvMentionDocs = null;
+
+        reviewTvSubtitle = null;
+        reviewBtnConfirmAll = null;
+
+        settingsTvStorageUsed = null;
+        settingsTvTotalDocs = null;
     }
 
     private void renderWelcomeScreen() {
@@ -195,33 +726,33 @@ public class MainActivity extends AppCompatActivity {
         Button btnSettings = view.findViewById(R.id.btn_settings);
         EditText etSearch = view.findViewById(R.id.et_search);
         TextView btnClearSearch = view.findViewById(R.id.btn_clear_search);
-        LinearLayout layoutNormalContent = view.findViewById(R.id.layout_normal_content);
+        homeLayoutNormalContent = view.findViewById(R.id.layout_normal_content);
         Button btnScanDevice = view.findViewById(R.id.btn_scan_device);
         Button btnAddFiles = view.findViewById(R.id.btn_add_files);
-        Button btnMyDocuments = view.findViewById(R.id.btn_my_documents);
+        homeBtnMyDocuments = view.findViewById(R.id.btn_my_documents);
 
-        MaterialCardView cardScanProgress = view.findViewById(R.id.card_scan_progress);
-        TextView tvScanProgress = view.findViewById(R.id.tv_scan_progress);
+        homeCardScanProgress = view.findViewById(R.id.card_scan_progress);
+        homeTvScanProgress = view.findViewById(R.id.tv_scan_progress);
         Button btnStopScan = view.findViewById(R.id.btn_stop_scan);
 
         RecyclerView rvCategories = view.findViewById(R.id.rv_categories);
-        TextView tvDocsSectionTitle = view.findViewById(R.id.tv_documents_section_title);
-        MaterialCardView cardLoadingDocs = view.findViewById(R.id.card_loading_documents);
-        TextView tvLoadingText = view.findViewById(R.id.tv_loading_text);
-        MaterialCardView cardEmptyDocs = view.findViewById(R.id.card_empty_documents);
-        TextView tvEmptyTitle = view.findViewById(R.id.tv_empty_title);
-        TextView tvEmptySubtitle = view.findViewById(R.id.tv_empty_subtitle);
+        homeTvDocsSectionTitle = view.findViewById(R.id.tv_documents_section_title);
+        homeCardLoadingDocs = view.findViewById(R.id.card_loading_documents);
+        homeTvLoadingText = view.findViewById(R.id.tv_loading_text);
+        homeCardEmptyDocs = view.findViewById(R.id.card_empty_documents);
+        homeTvEmptyTitle = view.findViewById(R.id.tv_empty_title);
+        homeTvEmptySubtitle = view.findViewById(R.id.tv_empty_subtitle);
 
-        RecyclerView rvDocuments = view.findViewById(R.id.rv_documents);
-        TextView tvMentionHeader = view.findViewById(R.id.tv_mention_header);
-        RecyclerView rvMentionDocuments = view.findViewById(R.id.rv_mention_documents);
+        homeRvDocuments = view.findViewById(R.id.rv_documents);
+        homeTvMentionHeader = view.findViewById(R.id.tv_mention_header);
+        homeRvMentionDocuments = view.findViewById(R.id.rv_mention_documents);
 
         btnSettings.setOnClickListener(v -> navigateTo(ScreenType.SETTINGS, null));
 
         btnScanDevice.setOnClickListener(v -> viewModel.startDeviceScan());
         btnStopScan.setOnClickListener(v -> viewModel.stopDeviceScan());
 
-        btnAddFiles.setOnClickListener(v -> filePickerLauncher.launch(new String[]{
+        btnAddFiles.setOnClickListener(v -> filePickerLauncher.launch(new String[] {
                 "application/pdf",
                 "image/*",
                 "text/plain",
@@ -229,151 +760,42 @@ public class MainActivity extends AppCompatActivity {
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         }));
 
-        btnMyDocuments.setOnClickListener(v -> navigateTo(ScreenType.MY_DOCUMENTS, null));
+        homeBtnMyDocuments.setOnClickListener(v -> navigateTo(ScreenType.MY_DOCUMENTS, null));
 
         // Categories Grid Setup
-        CategoryAdapter categoryAdapter = new CategoryAdapter(categoryName -> navigateTo(ScreenType.CATEGORY_DETAIL, categoryName));
         rvCategories.setLayoutManager(new GridLayoutManager(this, 2));
-        rvCategories.setAdapter(categoryAdapter);
+        rvCategories.setAdapter(homeCategoryAdapter);
 
         // Document Adapters Setup
-        DocumentAdapter.DocumentActionListener docListener = createDocumentActionListener();
-        DocumentAdapter docAdapter = new DocumentAdapter(docListener);
-        rvDocuments.setLayoutManager(new LinearLayoutManager(this));
-        rvDocuments.setAdapter(docAdapter);
+        homeRvDocuments.setLayoutManager(new LinearLayoutManager(this));
+        homeRvDocuments.setAdapter(homeDocAdapter);
 
-        DocumentAdapter mentionAdapter = new DocumentAdapter(docListener);
-        rvMentionDocuments.setLayoutManager(new LinearLayoutManager(this));
-        rvMentionDocuments.setAdapter(mentionAdapter);
+        homeRvMentionDocuments.setLayoutManager(new LinearLayoutManager(this));
+        homeRvMentionDocuments.setAdapter(homeMentionAdapter);
 
         // Search text change listener
         etSearch.setText(viewModel.getSearchQuery().getValue());
         etSearch.addTextChangedListener(new TextWatcher() {
             @Override
-            public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {
+            }
+
             @Override
             public void onTextChanged(CharSequence s, int start, int before, int count) {
                 String q = s != null ? s.toString() : "";
                 btnClearSearch.setVisibility(q.isEmpty() ? View.GONE : View.VISIBLE);
                 viewModel.setSearchQuery(q);
             }
+
             @Override
-            public void afterTextChanged(Editable s) {}
+            public void afterTextChanged(Editable s) {
+            }
         });
 
         btnClearSearch.setOnClickListener(v -> {
             etSearch.setText("");
             viewModel.setSearchQuery("");
         });
-
-        // Observers for Home state
-        viewModel.getCategoryCounts().observe(this, counts -> {
-            boolean loaded = Boolean.TRUE.equals(viewModel.getIsDatabaseLoaded().getValue());
-            categoryAdapter.setCategoryCounts(counts, loaded);
-        });
-
-        viewModel.getIsDatabaseLoaded().observe(this, loaded -> {
-            categoryAdapter.setCategoryCounts(viewModel.getCategoryCounts().getValue(), Boolean.TRUE.equals(loaded));
-            List<DocumentEntity> allDocs = viewModel.getAllDocuments().getValue();
-            int count = allDocs != null ? allDocs.size() : 0;
-            btnMyDocuments.setText(Boolean.TRUE.equals(loaded) ? "📁 My Documents (" + count + ")" : "📁 My Documents (...)");
-        });
-
-        viewModel.getAllDocuments().observe(this, allDocs -> {
-            boolean loaded = Boolean.TRUE.equals(viewModel.getIsDatabaseLoaded().getValue());
-            int count = allDocs != null ? allDocs.size() : 0;
-            btnMyDocuments.setText(loaded ? "📁 My Documents (" + count + ")" : "📁 My Documents (...)");
-            categoryAdapter.setCategoryCounts(viewModel.getCategoryCounts().getValue(), loaded);
-        });
-
-        viewModel.getImportState().observe(this, state -> {
-            if (state instanceof DocumentViewModel.ImportState.Processing) {
-                cardScanProgress.setVisibility(View.VISIBLE);
-                tvScanProgress.setText(((DocumentViewModel.ImportState.Processing) state).getProgress());
-            } else {
-                cardScanProgress.setVisibility(View.GONE);
-            }
-        });
-
-        Observer<Object> contentObserver = o -> {
-            String q = viewModel.getSearchQuery().getValue();
-            boolean isSearching = q != null && !q.trim().isEmpty();
-            boolean isLoaded = Boolean.TRUE.equals(viewModel.getIsDatabaseLoaded().getValue());
-            boolean isSearchLoading = Boolean.TRUE.equals(viewModel.getIsSearchLoading().getValue());
-            RankedSearchResults ranked = viewModel.getRankedSearchResults().getValue();
-            List<DocumentEntity> allDocs = viewModel.getAllDocuments().getValue();
-
-            if (isSearching) {
-                layoutNormalContent.setVisibility(View.GONE);
-                tvDocsSectionTitle.setText("Search Results");
-
-                if (isSearchLoading) {
-                    cardLoadingDocs.setVisibility(View.VISIBLE);
-                    tvLoadingText.setText("Searching documents...");
-                    cardEmptyDocs.setVisibility(View.GONE);
-                    rvDocuments.setVisibility(View.GONE);
-                    tvMentionHeader.setVisibility(View.GONE);
-                    rvMentionDocuments.setVisibility(View.GONE);
-                } else if (ranked == null || (ranked.getPrimaryMatches().isEmpty() && ranked.getMentionMatches().isEmpty())) {
-                    cardLoadingDocs.setVisibility(View.GONE);
-                    cardEmptyDocs.setVisibility(View.VISIBLE);
-                    tvEmptyTitle.setText("No matching documents found");
-                    tvEmptySubtitle.setText("Try adjusting search terms or scanning your device.");
-                    rvDocuments.setVisibility(View.GONE);
-                    tvMentionHeader.setVisibility(View.GONE);
-                    rvMentionDocuments.setVisibility(View.GONE);
-                } else {
-                    cardLoadingDocs.setVisibility(View.GONE);
-                    cardEmptyDocs.setVisibility(View.GONE);
-
-                    rvDocuments.setVisibility(View.VISIBLE);
-                    docAdapter.setDocuments(ranked.getPrimaryMatches());
-
-                    if (!ranked.getMentionMatches().isEmpty()) {
-                        tvMentionHeader.setVisibility(View.VISIBLE);
-                        tvMentionHeader.setText(ranked.getPrimaryMatches().isEmpty()
-                                ? "Documents mentioning \"" + q + "\""
-                                : "Other documents mentioning \"" + q + "\"");
-                        rvMentionDocuments.setVisibility(View.VISIBLE);
-                        mentionAdapter.setDocuments(ranked.getMentionMatches());
-                    } else {
-                        tvMentionHeader.setVisibility(View.GONE);
-                        rvMentionDocuments.setVisibility(View.GONE);
-                    }
-                }
-            } else {
-                layoutNormalContent.setVisibility(View.VISIBLE);
-                tvDocsSectionTitle.setText("Recent Documents");
-                tvMentionHeader.setVisibility(View.GONE);
-                rvMentionDocuments.setVisibility(View.GONE);
-
-                if (!isLoaded) {
-                    cardLoadingDocs.setVisibility(View.VISIBLE);
-                    tvLoadingText.setText("Loading documents...");
-                    cardEmptyDocs.setVisibility(View.GONE);
-                    rvDocuments.setVisibility(View.GONE);
-                } else if (allDocs == null || allDocs.isEmpty()) {
-                    cardLoadingDocs.setVisibility(View.GONE);
-                    cardEmptyDocs.setVisibility(View.VISIBLE);
-                    tvEmptyTitle.setText("No documents imported yet");
-                    tvEmptySubtitle.setText("Tap 'Scan Device' above to search external folders, or 'Add Files' to select manually.");
-                    rvDocuments.setVisibility(View.GONE);
-                } else {
-                    cardLoadingDocs.setVisibility(View.GONE);
-                    cardEmptyDocs.setVisibility(View.GONE);
-                    rvDocuments.setVisibility(View.VISIBLE);
-
-                    List<DocumentEntity> recent = allDocs.size() > 10 ? allDocs.subList(0, 10) : allDocs;
-                    docAdapter.setDocuments(recent);
-                }
-            }
-        };
-
-        viewModel.getSearchQuery().observe(this, contentObserver);
-        viewModel.getIsSearchLoading().observe(this, contentObserver);
-        viewModel.getRankedSearchResults().observe(this, contentObserver);
-        viewModel.getAllDocuments().observe(this, contentObserver);
-        viewModel.getIsDatabaseLoaded().observe(this, contentObserver);
 
         screenContainer.addView(view);
     }
@@ -383,43 +805,21 @@ public class MainActivity extends AppCompatActivity {
 
         Button btnBack = view.findViewById(R.id.btn_category_back);
         TextView tvTitle = view.findViewById(R.id.tv_category_title);
-        TextView tvSubtitle = view.findViewById(R.id.tv_category_count_subtitle);
-        LinearLayout layoutLoading = view.findViewById(R.id.layout_category_loading);
-        TextView tvLoadingText = view.findViewById(R.id.tv_category_loading_text);
-        LinearLayout layoutEmpty = view.findViewById(R.id.layout_category_empty);
-        TextView tvEmptyTitle = view.findViewById(R.id.tv_category_empty_title);
-        RecyclerView rvDocs = view.findViewById(R.id.rv_category_documents);
+        categoryDetailTvSubtitle = view.findViewById(R.id.tv_category_count_subtitle);
+        categoryDetailLayoutLoading = view.findViewById(R.id.layout_category_loading);
+        categoryDetailTvLoadingText = view.findViewById(R.id.tv_category_loading_text);
+        categoryDetailLayoutEmpty = view.findViewById(R.id.layout_category_empty);
+        categoryDetailTvEmptyTitle = view.findViewById(R.id.tv_category_empty_title);
+        categoryDetailRvDocs = view.findViewById(R.id.rv_category_documents);
 
         tvTitle.setText(category != null ? category : "");
-        tvLoadingText.setText("Loading " + (category != null ? category : "") + " documents...");
-        tvEmptyTitle.setText("No documents in " + (category != null ? category : ""));
+        categoryDetailTvLoadingText.setText("Loading " + (category != null ? category : "") + " documents...");
+        categoryDetailTvEmptyTitle.setText("No documents in " + (category != null ? category : ""));
 
         btnBack.setOnClickListener(v -> navigateTo(ScreenType.HOME, null));
 
-        DocumentAdapter adapter = new DocumentAdapter(createDocumentActionListener());
-        rvDocs.setLayoutManager(new LinearLayoutManager(this));
-        rvDocs.setAdapter(adapter);
-
-        viewModel.getCategoryDocuments(category).observe(this, docs -> {
-            boolean isLoaded = Boolean.TRUE.equals(viewModel.getIsDatabaseLoaded().getValue());
-            if (!isLoaded) {
-                tvSubtitle.setText("— document(s)");
-                layoutLoading.setVisibility(View.VISIBLE);
-                layoutEmpty.setVisibility(View.GONE);
-                rvDocs.setVisibility(View.GONE);
-            } else if (docs == null || docs.isEmpty()) {
-                tvSubtitle.setText("0 document(s)");
-                layoutLoading.setVisibility(View.GONE);
-                layoutEmpty.setVisibility(View.VISIBLE);
-                rvDocs.setVisibility(View.GONE);
-            } else {
-                tvSubtitle.setText(docs.size() + " document(s)");
-                layoutLoading.setVisibility(View.GONE);
-                layoutEmpty.setVisibility(View.GONE);
-                rvDocs.setVisibility(View.VISIBLE);
-                adapter.setDocuments(docs);
-            }
-        });
+        categoryDetailRvDocs.setLayoutManager(new LinearLayoutManager(this));
+        categoryDetailRvDocs.setAdapter(categoryDetailAdapter);
 
         screenContainer.addView(view);
     }
@@ -431,22 +831,22 @@ public class MainActivity extends AppCompatActivity {
         EditText etSearch = view.findViewById(R.id.et_files_search);
         TextView btnClearSearch = view.findViewById(R.id.btn_clear_files_search);
         Button btnAddDocs = view.findViewById(R.id.btn_files_add_documents);
-        LinearLayout layoutProgress = view.findViewById(R.id.layout_files_progress);
-        TextView tvProgress = view.findViewById(R.id.tv_files_progress);
-        TextView tvCountLabel = view.findViewById(R.id.tv_files_count_label);
+        filesLayoutProgress = view.findViewById(R.id.layout_files_progress);
+        filesTvProgress = view.findViewById(R.id.tv_files_progress);
+        filesTvCountLabel = view.findViewById(R.id.tv_files_count_label);
 
-        LinearLayout layoutLoading = view.findViewById(R.id.layout_files_loading);
-        TextView tvLoadingText = view.findViewById(R.id.tv_files_loading_text);
-        LinearLayout layoutEmpty = view.findViewById(R.id.layout_files_empty);
-        TextView tvEmptyTitle = view.findViewById(R.id.tv_files_empty_title);
+        filesLayoutLoading = view.findViewById(R.id.layout_files_loading);
+        filesTvLoadingText = view.findViewById(R.id.tv_files_loading_text);
+        filesLayoutEmpty = view.findViewById(R.id.layout_files_empty);
+        filesTvEmptyTitle = view.findViewById(R.id.tv_files_empty_title);
 
-        RecyclerView rvDocs = view.findViewById(R.id.rv_files_documents);
-        TextView tvMentionHeader = view.findViewById(R.id.tv_files_mention_header);
-        RecyclerView rvMentionDocs = view.findViewById(R.id.rv_files_mention_documents);
+        filesRvDocs = view.findViewById(R.id.rv_files_documents);
+        filesTvMentionHeader = view.findViewById(R.id.tv_files_mention_header);
+        filesRvMentionDocs = view.findViewById(R.id.rv_files_mention_documents);
 
         btnBack.setOnClickListener(v -> navigateTo(ScreenType.HOME, null));
 
-        btnAddDocs.setOnClickListener(v -> filePickerLauncher.launch(new String[]{
+        btnAddDocs.setOnClickListener(v -> filePickerLauncher.launch(new String[] {
                 "application/pdf",
                 "image/*",
                 "text/plain",
@@ -454,124 +854,34 @@ public class MainActivity extends AppCompatActivity {
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         }));
 
-        DocumentAdapter.DocumentActionListener docListener = createDocumentActionListener();
-        DocumentAdapter docAdapter = new DocumentAdapter(docListener);
-        rvDocs.setLayoutManager(new LinearLayoutManager(this));
-        rvDocs.setAdapter(docAdapter);
+        filesRvDocs.setLayoutManager(new LinearLayoutManager(this));
+        filesRvDocs.setAdapter(filesDocAdapter);
 
-        DocumentAdapter mentionAdapter = new DocumentAdapter(docListener);
-        rvMentionDocs.setLayoutManager(new LinearLayoutManager(this));
-        rvMentionDocs.setAdapter(mentionAdapter);
+        filesRvMentionDocs.setLayoutManager(new LinearLayoutManager(this));
+        filesRvMentionDocs.setAdapter(filesMentionAdapter);
 
         etSearch.setText(viewModel.getSearchQuery().getValue());
         etSearch.addTextChangedListener(new TextWatcher() {
             @Override
-            public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {
+            }
+
             @Override
             public void onTextChanged(CharSequence s, int start, int before, int count) {
                 String q = s != null ? s.toString() : "";
                 btnClearSearch.setVisibility(q.isEmpty() ? View.GONE : View.VISIBLE);
                 viewModel.setSearchQuery(q);
             }
+
             @Override
-            public void afterTextChanged(Editable s) {}
+            public void afterTextChanged(Editable s) {
+            }
         });
 
         btnClearSearch.setOnClickListener(v -> {
             etSearch.setText("");
             viewModel.setSearchQuery("");
         });
-
-        viewModel.getImportState().observe(this, state -> {
-            if (state instanceof DocumentViewModel.ImportState.Processing) {
-                layoutProgress.setVisibility(View.VISIBLE);
-                tvProgress.setText(((DocumentViewModel.ImportState.Processing) state).getProgress());
-            } else {
-                layoutProgress.setVisibility(View.GONE);
-            }
-        });
-
-        Observer<Object> filesObserver = o -> {
-            String q = viewModel.getSearchQuery().getValue();
-            boolean isSearching = q != null && !q.trim().isEmpty();
-            boolean isLoaded = Boolean.TRUE.equals(viewModel.getIsDatabaseLoaded().getValue());
-            boolean isSearchLoading = Boolean.TRUE.equals(viewModel.getIsSearchLoading().getValue());
-            RankedSearchResults ranked = viewModel.getRankedSearchResults().getValue();
-            List<DocumentEntity> allDocs = viewModel.getAllDocuments().getValue();
-
-            int totalMatches = (ranked != null) ? (ranked.getPrimaryMatches().size() + ranked.getMentionMatches().size()) : 0;
-            if (isLoaded) {
-                if (isSearching) {
-                    tvCountLabel.setText(totalMatches + " result(s) found");
-                } else {
-                    int count = allDocs != null ? allDocs.size() : 0;
-                    tvCountLabel.setText(count + " document(s) stored");
-                }
-            } else {
-                tvCountLabel.setText("— document(s) stored");
-            }
-
-            if (isSearching) {
-                if (isSearchLoading) {
-                    layoutLoading.setVisibility(View.VISIBLE);
-                    tvLoadingText.setText("Searching documents...");
-                    layoutEmpty.setVisibility(View.GONE);
-                    rvDocs.setVisibility(View.GONE);
-                    tvMentionHeader.setVisibility(View.GONE);
-                    rvMentionDocs.setVisibility(View.GONE);
-                } else if (ranked == null || (ranked.getPrimaryMatches().isEmpty() && ranked.getMentionMatches().isEmpty())) {
-                    layoutLoading.setVisibility(View.GONE);
-                    layoutEmpty.setVisibility(View.VISIBLE);
-                    tvEmptyTitle.setText("No matching documents found");
-                    rvDocs.setVisibility(View.GONE);
-                    tvMentionHeader.setVisibility(View.GONE);
-                    rvMentionDocs.setVisibility(View.GONE);
-                } else {
-                    layoutLoading.setVisibility(View.GONE);
-                    layoutEmpty.setVisibility(View.GONE);
-                    rvDocs.setVisibility(View.VISIBLE);
-                    docAdapter.setDocuments(ranked.getPrimaryMatches());
-
-                    if (!ranked.getMentionMatches().isEmpty()) {
-                        tvMentionHeader.setVisibility(View.VISIBLE);
-                        tvMentionHeader.setText(ranked.getPrimaryMatches().isEmpty()
-                                ? "Documents mentioning \"" + q + "\""
-                                : "Other documents mentioning \"" + q + "\"");
-                        rvMentionDocs.setVisibility(View.VISIBLE);
-                        mentionAdapter.setDocuments(ranked.getMentionMatches());
-                    } else {
-                        tvMentionHeader.setVisibility(View.GONE);
-                        rvMentionDocs.setVisibility(View.GONE);
-                    }
-                }
-            } else {
-                tvMentionHeader.setVisibility(View.GONE);
-                rvMentionDocs.setVisibility(View.GONE);
-
-                if (!isLoaded) {
-                    layoutLoading.setVisibility(View.VISIBLE);
-                    tvLoadingText.setText("Loading documents...");
-                    layoutEmpty.setVisibility(View.GONE);
-                    rvDocs.setVisibility(View.GONE);
-                } else if (allDocs == null || allDocs.isEmpty()) {
-                    layoutLoading.setVisibility(View.GONE);
-                    layoutEmpty.setVisibility(View.VISIBLE);
-                    tvEmptyTitle.setText("No documents imported yet");
-                    rvDocs.setVisibility(View.GONE);
-                } else {
-                    layoutLoading.setVisibility(View.GONE);
-                    layoutEmpty.setVisibility(View.GONE);
-                    rvDocs.setVisibility(View.VISIBLE);
-                    docAdapter.setDocuments(allDocs);
-                }
-            }
-        };
-
-        viewModel.getSearchQuery().observe(this, filesObserver);
-        viewModel.getIsSearchLoading().observe(this, filesObserver);
-        viewModel.getRankedSearchResults().observe(this, filesObserver);
-        viewModel.getAllDocuments().observe(this, filesObserver);
-        viewModel.getIsDatabaseLoaded().observe(this, filesObserver);
 
         screenContainer.addView(view);
     }
@@ -580,44 +890,24 @@ public class MainActivity extends AppCompatActivity {
         View view = LayoutInflater.from(this).inflate(R.layout.view_review_import, screenContainer, false);
 
         Button btnCancel = view.findViewById(R.id.btn_review_cancel);
-        TextView tvSubtitle = view.findViewById(R.id.tv_review_count_subtitle);
+        reviewTvSubtitle = view.findViewById(R.id.tv_review_count_subtitle);
         RecyclerView rvCandidates = view.findViewById(R.id.rv_candidates);
-        Button btnConfirmAll = view.findViewById(R.id.btn_review_confirm_all);
+        reviewBtnConfirmAll = view.findViewById(R.id.btn_review_confirm_all);
 
         btnCancel.setOnClickListener(v -> {
             viewModel.clearCandidateQueue();
             navigateTo(ScreenType.HOME, null);
         });
 
-        CandidateAdapter adapter = new CandidateAdapter(new CandidateAdapter.CandidateActionListener() {
-            @Override
-            public void onCategoryChanged(int position, String newCategory) {
-                viewModel.updateCandidateCategory(position, newCategory);
-            }
-
-            @Override
-            public void onRemoveCandidate(int position) {
-                viewModel.removeCandidateFromQueue(position);
-            }
-        });
-
         rvCandidates.setLayoutManager(new LinearLayoutManager(this));
-        rvCandidates.setAdapter(adapter);
+        rvCandidates.setAdapter(reviewAdapter);
 
-        viewModel.getCandidateQueue().observe(this, candidates -> {
-            int count = candidates != null ? candidates.size() : 0;
-            tvSubtitle.setText(count + " candidate(s) analyzed");
-            btnConfirmAll.setText("Confirm & Import Selected Documents (" + count + ")");
-            btnConfirmAll.setEnabled(count > 0);
-            adapter.setCandidates(candidates);
-        });
-
-        btnConfirmAll.setOnClickListener(v -> {
+        reviewBtnConfirmAll.setOnClickListener(v -> {
             List<CandidateImportItem> queue = viewModel.getCandidateQueue().getValue();
             if (queue != null && !queue.isEmpty()) {
                 viewModel.confirmCandidateImports(queue);
             }
-            navigateTo(ScreenType.HOME, null);
+            navigateTo(ScreenType.MY_DOCUMENTS, null);
         });
 
         screenContainer.addView(view);
@@ -631,8 +921,8 @@ public class MainActivity extends AppCompatActivity {
         Chip chipSystem = view.findViewById(R.id.chip_theme_system);
         Chip chipLight = view.findViewById(R.id.chip_theme_light);
         Chip chipDark = view.findViewById(R.id.chip_theme_dark);
-        TextView tvStorageUsed = view.findViewById(R.id.tv_settings_storage_used);
-        TextView tvTotalDocs = view.findViewById(R.id.tv_settings_total_docs);
+        settingsTvStorageUsed = view.findViewById(R.id.tv_settings_storage_used);
+        settingsTvTotalDocs = view.findViewById(R.id.tv_settings_total_docs);
 
         btnBack.setOnClickListener(v -> navigateTo(ScreenType.HOME, null));
 
@@ -654,17 +944,6 @@ public class MainActivity extends AppCompatActivity {
             } else {
                 viewModel.setTheme("System");
             }
-        });
-
-        // Storage stats
-        StorageManager.StorageStats stats = viewModel.getStorageManager().getStorageStats();
-        tvStorageUsed.setText(Formatter.formatShortFileSize(this, stats.getTotalBytes()));
-
-        viewModel.getTotalCount().observe(this, count -> {
-            int c = count != null ? count : 0;
-            tvTotalDocs.setText(c + " document(s)");
-            StorageManager.StorageStats s = viewModel.getStorageManager().getStorageStats();
-            tvStorageUsed.setText(Formatter.formatShortFileSize(this, s.getTotalBytes()));
         });
 
         screenContainer.addView(view);
@@ -758,7 +1037,8 @@ public class MainActivity extends AppCompatActivity {
     private void showDeleteConfirmDialog(final DocumentEntity document) {
         new MaterialAlertDialogBuilder(this)
                 .setTitle("Remove Document")
-                .setMessage("Are you sure you want to remove '" + document.getEffectiveDisplayName() + "' from Personal Document Finder? Your original external file will remain safe and untouched.")
+                .setMessage("Are you sure you want to remove '" + document.getEffectiveDisplayName()
+                        + "' from Personal Document Finder? Your original external file will remain safe and untouched.")
                 .setPositiveButton("Remove", (dialog, which) -> viewModel.deleteDocument(document))
                 .setNegativeButton("Cancel", null)
                 .show();
@@ -767,7 +1047,8 @@ public class MainActivity extends AppCompatActivity {
     private void showPermissionRationaleDialog() {
         new MaterialAlertDialogBuilder(this)
                 .setTitle("Storage Access Required")
-                .setMessage("To automatically discover and index your personal documents across device folders (PDFs, receipts, identity cards, hall tickets), Personal Document Finder requires All Files Access permission.")
+                .setMessage(
+                        "To automatically discover and index your personal documents across device folders (PDFs, receipts, identity cards, hall tickets), Personal Document Finder requires All Files Access permission.")
                 .setPositiveButton("Grant Permission", (dialog, which) -> {
                     viewModel.clearCandidateQueue();
                     Intent intent = PermissionManager.getManageStorageIntent(MainActivity.this);

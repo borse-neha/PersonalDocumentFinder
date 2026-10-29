@@ -9,6 +9,26 @@ public class CandidateImportItem {
     private final ClassificationResult classification;
     private final String selectedCategory;
     private final boolean isDuplicate;
+    private final String displayName;
+    private final String duplicateOfName;
+
+    public CandidateImportItem(
+            Uri uri,
+            String fileName,
+            ClassificationResult classification,
+            String selectedCategory,
+            boolean isDuplicate,
+            String displayName,
+            String duplicateOfName
+    ) {
+        this.uri = uri;
+        this.fileName = fileName != null ? fileName : "";
+        this.classification = classification;
+        this.selectedCategory = selectedCategory != null ? selectedCategory : (classification != null ? classification.getCategory() : "");
+        this.isDuplicate = isDuplicate;
+        this.displayName = displayName != null && !displayName.trim().isEmpty() ? displayName : this.fileName;
+        this.duplicateOfName = duplicateOfName;
+    }
 
     public CandidateImportItem(
             Uri uri,
@@ -17,11 +37,15 @@ public class CandidateImportItem {
             String selectedCategory,
             boolean isDuplicate
     ) {
-        this.uri = uri;
-        this.fileName = fileName != null ? fileName : "";
-        this.classification = classification;
-        this.selectedCategory = selectedCategory != null ? selectedCategory : (classification != null ? classification.getCategory() : "");
-        this.isDuplicate = isDuplicate;
+        this(
+                uri,
+                fileName,
+                classification,
+                selectedCategory,
+                isDuplicate,
+                fileName,
+                null
+        );
     }
 
     public CandidateImportItem(
@@ -34,7 +58,9 @@ public class CandidateImportItem {
                 fileName,
                 classification,
                 classification != null ? classification.getCategory() : "",
-                false
+                false,
+                fileName,
+                null
         );
     }
 
@@ -58,13 +84,23 @@ public class CandidateImportItem {
         return isDuplicate;
     }
 
+    public String getDisplayName() {
+        return displayName != null ? displayName : fileName;
+    }
+
+    public String getDuplicateOfName() {
+        return duplicateOfName;
+    }
+
     public CandidateImportItem copy(String newSelectedCategory) {
         return new CandidateImportItem(
                 uri,
                 fileName,
                 classification,
                 newSelectedCategory,
-                isDuplicate
+                isDuplicate,
+                displayName,
+                duplicateOfName
         );
     }
 
@@ -74,7 +110,9 @@ public class CandidateImportItem {
                 fileName,
                 classification,
                 newSelectedCategory,
-                newIsDuplicate
+                newIsDuplicate,
+                displayName,
+                duplicateOfName
         );
     }
 
@@ -87,12 +125,14 @@ public class CandidateImportItem {
                 Objects.equals(uri, that.uri) &&
                 Objects.equals(fileName, that.fileName) &&
                 Objects.equals(classification, that.classification) &&
-                Objects.equals(selectedCategory, that.selectedCategory);
+                Objects.equals(selectedCategory, that.selectedCategory) &&
+                Objects.equals(displayName, that.displayName) &&
+                Objects.equals(duplicateOfName, that.duplicateOfName);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(uri, fileName, classification, selectedCategory, isDuplicate);
+        return Objects.hash(uri, fileName, classification, selectedCategory, isDuplicate, displayName, duplicateOfName);
     }
 
     @Override
@@ -103,6 +143,8 @@ public class CandidateImportItem {
                 ", classification=" + classification +
                 ", selectedCategory='" + selectedCategory + '\'' +
                 ", isDuplicate=" + isDuplicate +
+                ", displayName='" + displayName + '\'' +
+                ", duplicateOfName='" + duplicateOfName + '\'' +
                 '}';
     }
 }

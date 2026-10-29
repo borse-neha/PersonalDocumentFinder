@@ -64,8 +64,16 @@ public class CandidateAdapter extends RecyclerView.Adapter<CandidateAdapter.Cand
         final ClassificationResult classification = candidate.getClassification();
 
         holder.tvIcon.setText(classification != null && classification.isDocument() ? "📄" : "📷");
-        holder.tvName.setText(candidate.getFileName());
-        holder.tvType.setText("Type: " + (classification != null ? classification.getDocumentType() : "Unknown"));
+        String docType = (classification != null && classification.getDocumentType() != null && !classification.getDocumentType().trim().isEmpty() &&
+                !classification.getDocumentType().equals("Unclassified Document") &&
+                !classification.getDocumentType().equals("Photograph / Non-Document"))
+                ? classification.getDocumentType()
+                : "Other Document";
+        String smartName = (candidate.getDisplayName() != null && !candidate.getDisplayName().trim().isEmpty())
+                ? candidate.getDisplayName()
+                : docType;
+        holder.tvName.setText(smartName);
+        holder.tvType.setText("File: " + candidate.getFileName() + " • " + docType);
 
         // Confidence Badge
         if (classification == null || !classification.isDocument()) {
@@ -101,7 +109,16 @@ public class CandidateAdapter extends RecyclerView.Adapter<CandidateAdapter.Cand
         }
 
         // Duplicate
-        holder.tvDuplicate.setVisibility(candidate.isDuplicate() ? View.VISIBLE : View.GONE);
+        if (candidate.isDuplicate()) {
+            holder.tvDuplicate.setVisibility(View.VISIBLE);
+            if (candidate.getDuplicateOfName() != null && !candidate.getDuplicateOfName().trim().isEmpty()) {
+                holder.tvDuplicate.setText("⚠️ Duplicate of: \"" + candidate.getDuplicateOfName() + "\"");
+            } else {
+                holder.tvDuplicate.setText("⚠️ Duplicate content detected in database");
+            }
+        } else {
+            holder.tvDuplicate.setVisibility(View.GONE);
+        }
 
         // Spinner Setup
         ArrayAdapter<String> spinnerAdapter = new ArrayAdapter<>(

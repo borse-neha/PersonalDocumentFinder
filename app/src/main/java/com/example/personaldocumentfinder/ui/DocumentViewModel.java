@@ -53,6 +53,7 @@ public class DocumentViewModel extends AndroidViewModel {
 
     private final ExecutorService ioExecutor = Executors.newFixedThreadPool(4);
     private final AtomicBoolean isScanActive = new AtomicBoolean(false);
+    private final java.util.concurrent.atomic.AtomicInteger searchSequence = new java.util.concurrent.atomic.AtomicInteger(0);
 
     private final MutableLiveData<Boolean> _isDatabaseLoaded = new MutableLiveData<>(false);
     private final LiveData<Boolean> isDatabaseLoaded = _isDatabaseLoaded;
@@ -67,6 +68,7 @@ public class DocumentViewModel extends AndroidViewModel {
     private final LiveData<RankedSearchResults> rankedSearchResults = _rankedSearchResults;
 
     private final LiveData<List<DocumentEntity>> searchResults;
+    private final LiveData<Map<String, Integer>> categoryCounts;
 
     private final MutableLiveData<ImportState> _importState = new MutableLiveData<>(new ImportState.Idle());
     private final LiveData<ImportState> importState = _importState;
@@ -149,11 +151,18 @@ public class DocumentViewModel extends AndroidViewModel {
             return ranked.getAllRanked();
         });
 
-        ioExecutor.execute(new Runnable() {
-            @Override
-            public void run() {
-                reclassifyExistingDocumentsIfNeeded();
+        categoryCounts = Transformations.map(repository.getAllDocuments(), docs -> {
+            Map<String, Integer> counts = new HashMap<>();
+            if (docs != null) {
+                for (DocumentEntity doc : docs) {
+                    String cat = doc.getCategory();
+                    if (cat != null && !cat.isEmpty()) {
+                        Integer cur = counts.get(cat);
+                        counts.put(cat, (cur == null ? 0 : cur) + 1);
+                    }
+                }
             }
+            return counts;
         });
     }
 
@@ -178,19 +187,7 @@ public class DocumentViewModel extends AndroidViewModel {
     }
 
     public LiveData<Map<String, Integer>> getCategoryCounts() {
-        return Transformations.map(repository.getAllDocuments(), docs -> {
-            Map<String, Integer> counts = new HashMap<>();
-            if (docs != null) {
-                for (DocumentEntity doc : docs) {
-                    String cat = doc.getCategory();
-                    if (cat != null && !cat.isEmpty()) {
-                        Integer cur = counts.get(cat);
-                        counts.put(cat, (cur == null ? 0 : cur) + 1);
-                    }
-                }
-            }
-            return counts;
-        });
+        return categoryCounts;
     }
 
     public LiveData<List<DocumentEntity>> getFavoriteDocuments() {
@@ -261,7 +258,7 @@ public class DocumentViewModel extends AndroidViewModel {
             if (docs == null) return Collections.<DocumentEntity>emptyList();
             List<DocumentEntity> filtered = new ArrayList<>();
             for (DocumentEntity d : docs) {
-                if (d.getCategory() != null && d.getCategory().equals(category)) {
+                if (d.getCategory() != null && d.getCategory().equalsIgnoreCase(category)) {
                     filtered.add(d);
                 }
             }
@@ -274,7 +271,7 @@ public class DocumentViewModel extends AndroidViewModel {
             if (docs == null) return 0;
             int count = 0;
             for (DocumentEntity d : docs) {
-                if (d.getCategory() != null && d.getCategory().equals(category)) {
+                if (d.getCategory() != null && d.getCategory().equalsIgnoreCase(category)) {
                     count++;
                 }
             }
@@ -284,6 +281,7 @@ public class DocumentViewModel extends AndroidViewModel {
 
     private void updateSearchResults(final String query, final List<DocumentEntity> allDocs) {
         final String trimmed = query != null ? query.trim() : "";
+        final int seq = searchSequence.incrementAndGet();
         if (trimmed.isEmpty()) {
             _isSearchLoading.postValue(false);
             List<DocumentEntity> list = allDocs != null ? allDocs : Collections.<DocumentEntity>emptyList();
@@ -293,10 +291,22 @@ public class DocumentViewModel extends AndroidViewModel {
             ioExecutor.execute(new Runnable() {
                 @Override
                 public void run() {
-                    List<DocumentEntity> list = allDocs != null ? allDocs : repository.getAllDocumentsSync();
-                    RankedSearchResults ranked = DocumentSearchEngine.rankAndGroupDocuments(list, trimmed);
-                    _isSearchLoading.postValue(false);
-                    _rankedSearchResults.postValue(ranked);
+                    try {
+                        List<DocumentEntity> list = allDocs != null ? allDocs : repository.getAllDocumentsSync();
+                        RankedSearchResults ranked = DocumentSearchEngine.rankAndGroupDocuments(list, trimmed);
+                        if (seq == searchSequence.get()) {
+                            _rankedSearchResults.postValue(ranked);
+                        }
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                        if (seq == searchSequence.get()) {
+                            _rankedSearchResults.postValue(new RankedSearchResults(Collections.<DocumentEntity>emptyList(), Collections.<DocumentEntity>emptyList()));
+                        }
+                    } finally {
+                        if (seq == searchSequence.get()) {
+                            _isSearchLoading.postValue(false);
+                        }
+                    }
                 }
             });
         }
@@ -390,6 +400,7 @@ public class DocumentViewModel extends AndroidViewModel {
             @Override
             public void run() {
                 final int[] counts = new int[5]; // 0: discovered, 1: analyzed, 2: imported, 3: skipped, 4: reviewNeeded
+                final List<CandidateImportItem> discoveredReviewItems = Collections.synchronizedList(new ArrayList<>());
                 _importState.postValue(new ImportState.Processing("Scanning storage for candidate documents..."));
 
                 deviceScanner.scanSharedStorage(20, new DeviceScanner.BatchConsumer() {
@@ -446,18 +457,22 @@ public class DocumentViewModel extends AndroidViewModel {
                                     !"Unclassified Document".equals(classification.getDocumentType());
 
                             if (isHighConfidence) {
+                                String autoDisplayName = repository.generateUniqueDisplayName(
+                                        classification.getDocumentType(),
+                                        classification.getCategory()
+                                );
+                                String ext = "";
+                                int dotIdx = candidate.getName().lastIndexOf('.');
+                                if (dotIdx != -1) ext = candidate.getName().substring(dotIdx);
+                                String smartFileName = autoDisplayName + ext;
+
                                 StorageManager.CopyResult copyResult = storageManager.copyFileToOrganizedStorage(
                                         candidate.getUri(),
                                         classification.getCategory(),
-                                        candidate.getName()
+                                        smartFileName
                                 );
 
                                 if (copyResult != null) {
-                                    String autoDisplayName = repository.generateUniqueDisplayName(
-                                            classification.getDocumentType(),
-                                            classification.getCategory()
-                                    );
-
                                     DocumentEntity documentEntity = new DocumentEntity(
                                             0L,
                                             candidate.getName(),
@@ -489,28 +504,37 @@ public class DocumentViewModel extends AndroidViewModel {
                                 }
                             } else if (classification.isDocument() && (classification.getCategoryConfidence() >= 0.45f || classification.getDocumentTypeConfidence() >= 0.45f)) {
                                 counts[4]++;
+                                String smartName = repository.generateUniqueDisplayName(
+                                        classification.getDocumentType(),
+                                        classification.getCategory()
+                                );
                                 CandidateImportItem queueItem = new CandidateImportItem(
                                         candidate.getUri(),
                                         candidate.getName(),
                                         classification,
                                         classification.getCategory(),
-                                        false
+                                        false,
+                                        smartName,
+                                        null
                                 );
-                                List<CandidateImportItem> current = _candidateQueue.getValue();
-                                List<CandidateImportItem> updated = new ArrayList<>(current != null ? current : Collections.<CandidateImportItem>emptyList());
-                                updated.add(queueItem);
-                                _candidateQueue.postValue(updated);
+                                discoveredReviewItems.add(queueItem);
+                                _candidateQueue.postValue(new ArrayList<>(discoveredReviewItems));
                             } else if (classification.isDocument()) {
+                                String autoDisplayName = repository.generateUniqueDisplayName(
+                                        classification.getDocumentType(),
+                                        "Other Documents"
+                                );
+                                String ext = "";
+                                int dotIdx = candidate.getName().lastIndexOf('.');
+                                if (dotIdx != -1) ext = candidate.getName().substring(dotIdx);
+                                String smartFileName = autoDisplayName + ext;
+
                                 StorageManager.CopyResult copyResult = storageManager.copyFileToOrganizedStorage(
                                         candidate.getUri(),
                                         "Other Documents",
-                                        candidate.getName()
+                                        smartFileName
                                 );
                                 if (copyResult != null) {
-                                    String autoDisplayName = repository.generateUniqueDisplayName(
-                                            classification.getDocumentType(),
-                                            "Other Documents"
-                                    );
                                     DocumentEntity documentEntity = new DocumentEntity(
                                             0L,
                                             candidate.getName(),
@@ -549,6 +573,7 @@ public class DocumentViewModel extends AndroidViewModel {
                 if (isScanActive.get()) {
                     isScanActive.set(false);
                     if (counts[4] > 0) {
+                        _candidateQueue.postValue(new ArrayList<>(discoveredReviewItems));
                         _statusMessage.postValue("Scan complete. Imported " + counts[2] + " document(s), " + counts[4] + " requiring review.");
                         _importState.postValue(new ImportState.ReviewNeeded(counts[4]));
                     } else {
@@ -565,6 +590,127 @@ public class DocumentViewModel extends AndroidViewModel {
             _importState.postValue(new ImportState.Idle());
             _statusMessage.postValue("Device scan cancelled.");
         }
+    }
+
+    public void importDocumentsFromUris(final List<Uri> uris) {
+        if (uris == null || uris.isEmpty()) return;
+
+        ioExecutor.execute(new Runnable() {
+            @Override
+            public void run() {
+                _importState.postValue(new ImportState.Processing("Importing " + uris.size() + " document(s)..."));
+
+                int imported = 0;
+                int duplicate = 0;
+                int failed = 0;
+                String lastDupeName = null;
+                String lastImportedName = null;
+
+                for (int i = 0; i < uris.size(); i++) {
+                    Uri uri = uris.get(i);
+                    if (uri == null) continue;
+
+                    _importState.postValue(new ImportState.Processing("Reading file " + (i + 1) + " of " + uris.size() + "..."));
+
+                    try {
+                        if (getApplication().getContentResolver() != null && "content".equals(uri.getScheme())) {
+                            getApplication().getContentResolver().takePersistableUriPermission(
+                                    uri,
+                                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                            );
+                        }
+                    } catch (Exception ignored) {}
+
+                    String originalName = storageManager.getFileNameFromUri(uri);
+                    String mimeType = "content".equalsIgnoreCase(uri.getScheme()) ? getApplication().getContentResolver().getType(uri) : null;
+                    if (mimeType == null) {
+                        String ext = StorageManager.getExtension(originalName);
+                        mimeType = storageManager.getMimeTypeFromExtension(ext);
+                    }
+
+                    // Check SHA-256 hash for duplicate
+                    String contentHash = storageManager.calculateContentHash(uri);
+                    if (contentHash != null && !contentHash.isEmpty()) {
+                        DocumentEntity existing = repository.getDocumentByHash(contentHash);
+                        if (existing != null) {
+                            duplicate++;
+                            lastDupeName = existing.getDisplayName();
+                            continue;
+                        }
+                    }
+
+                    // OCR and classification
+                    _importState.postValue(new ImportState.Processing("Running OCR & classifying document..."));
+                    String ocrText = OcrAnalyzer.extractText(getApplication(), uri, mimeType);
+                    ClassificationResult classification = DocumentClassifier.classify(ocrText, originalName, mimeType);
+
+                    String targetCategory = classification.getCategory();
+                    String docType = classification.getDocumentType();
+                    String smartDisplayName = repository.generateUniqueDisplayName(docType, targetCategory);
+
+                    String ext = "";
+                    int dotIdx = originalName.lastIndexOf('.');
+                    if (dotIdx != -1) {
+                        ext = originalName.substring(dotIdx);
+                    }
+                    String smartFileName = smartDisplayName + ext;
+
+                    StorageManager.CopyResult copyResult = storageManager.copyFileToOrganizedStorage(
+                            uri,
+                            targetCategory,
+                            smartFileName
+                    );
+
+                    if (copyResult == null) {
+                        failed++;
+                        continue;
+                    }
+
+                    DocumentEntity documentEntity = new DocumentEntity(
+                            0L,
+                            originalName,
+                            copyResult.getStoredFileName(),
+                            smartDisplayName,
+                            copyResult.getMimeType(),
+                            uri.toString(),
+                            copyResult.getInternalPath(),
+                            targetCategory,
+                            docType,
+                            classification.getDocumentConfidence(),
+                            classification.getCategoryConfidence(),
+                            ocrText,
+                            copyResult.getFileSize(),
+                            System.currentTimeMillis(),
+                            System.currentTimeMillis(),
+                            false,
+                            true,
+                            copyResult.getContentHash()
+                    );
+
+                    try {
+                        repository.insertDocument(documentEntity);
+                        imported++;
+                        lastImportedName = smartDisplayName;
+                    } catch (Exception e) {
+                        storageManager.deleteAppPrivateFile(copyResult.getInternalPath());
+                        e.printStackTrace();
+                        failed++;
+                    }
+                }
+
+                _importState.postValue(new ImportState.Idle());
+
+                if (imported > 0 && duplicate == 0 && failed == 0) {
+                    _statusMessage.postValue("Imported " + (imported == 1 ? ("'" + lastImportedName + "'") : (imported + " document(s)")) + " successfully.");
+                } else if (imported == 0 && duplicate > 0) {
+                    _statusMessage.postValue("Duplicate detected: matches existing document '" + (lastDupeName != null ? lastDupeName : "in library") + "'.");
+                } else if (imported > 0 && duplicate > 0) {
+                    _statusMessage.postValue("Imported " + imported + " document(s) (" + duplicate + " duplicate(s) skipped).");
+                } else if (failed > 0) {
+                    _statusMessage.postValue("Failed to import " + failed + " document(s). Please verify file permissions.");
+                }
+            }
+        });
     }
 
     public void scanAndAnalyzeDocuments(final List<Uri> uris) {
@@ -597,16 +743,28 @@ public class DocumentViewModel extends AndroidViewModel {
 
                     String contentHash = storageManager.calculateContentHash(uri);
                     boolean isDuplicate = false;
+                    String duplicateOfName = null;
                     if (contentHash != null && !contentHash.isEmpty()) {
-                        isDuplicate = repository.getDocumentByHash(contentHash) != null;
+                        DocumentEntity existing = repository.getDocumentByHash(contentHash);
+                        if (existing != null) {
+                            isDuplicate = true;
+                            duplicateOfName = existing.getDisplayName();
+                        }
                     }
+
+                    String smartName = repository.generateUniqueDisplayName(
+                            classification.getDocumentType(),
+                            classification.getCategory()
+                    );
 
                     candidates.add(new CandidateImportItem(
                             uri,
                             originalName,
                             classification,
                             classification.getCategory(),
-                            isDuplicate
+                            isDuplicate,
+                            smartName,
+                            duplicateOfName
                     ));
                 }
 
@@ -641,23 +799,25 @@ public class DocumentViewModel extends AndroidViewModel {
                 for (CandidateImportItem candidate : candidates) {
                     if (candidate == null || candidate.isDuplicate()) continue;
 
+                    String ext = "";
+                    int dotIdx = candidate.getFileName().lastIndexOf('.');
+                    if (dotIdx != -1) {
+                        ext = candidate.getFileName().substring(dotIdx);
+                    }
+                    String smartFileName = candidate.getDisplayName() + ext;
+
                     StorageManager.CopyResult copyResult = storageManager.copyFileToOrganizedStorage(
                             candidate.getUri(),
                             candidate.getSelectedCategory(),
-                            candidate.getFileName()
+                            smartFileName
                     );
 
                     if (copyResult != null) {
-                        String autoDisplayName = repository.generateUniqueDisplayName(
-                                candidate.getClassification().getDocumentType(),
-                                candidate.getSelectedCategory()
-                        );
-
                         DocumentEntity documentEntity = new DocumentEntity(
                                 0L,
                                 candidate.getFileName(),
                                 copyResult.getStoredFileName(),
-                                autoDisplayName,
+                                candidate.getDisplayName(),
                                 copyResult.getMimeType(),
                                 candidate.getUri().toString(),
                                 copyResult.getInternalPath(),

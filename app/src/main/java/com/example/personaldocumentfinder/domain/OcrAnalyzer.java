@@ -81,7 +81,11 @@ public final class OcrAnalyzer {
         PdfRenderer renderer = null;
 
         try {
-            pfd = context.getContentResolver().openFileDescriptor(uri, "r");
+            if ("file".equalsIgnoreCase(uri.getScheme())) {
+                pfd = ParcelFileDescriptor.open(new java.io.File(uri.getPath()), ParcelFileDescriptor.MODE_READ_ONLY);
+            } else {
+                pfd = context.getContentResolver().openFileDescriptor(uri, "r");
+            }
             if (pfd != null) {
                 renderer = new PdfRenderer(pfd);
                 int pageCount = Math.min(renderer.getPageCount(), 5);
@@ -127,7 +131,15 @@ public final class OcrAnalyzer {
 
     private static String extractFromTextUri(Context context, Uri uri) {
         if (context == null || uri == null) return "";
-        try (InputStream inputStream = context.getContentResolver().openInputStream(uri)) {
+        InputStream is = null;
+        try {
+            if ("file".equalsIgnoreCase(uri.getScheme())) {
+                is = new java.io.FileInputStream(new java.io.File(uri.getPath()));
+            } else {
+                is = context.getContentResolver().openInputStream(uri);
+            }
+        } catch (Exception ignored) {}
+        try (InputStream inputStream = is) {
             if (inputStream == null) return "";
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream))) {
                 StringBuilder sb = new StringBuilder();

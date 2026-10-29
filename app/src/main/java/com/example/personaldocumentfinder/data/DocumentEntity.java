@@ -28,6 +28,7 @@ public class DocumentEntity {
     private boolean isReviewed;
     private String contentHash;
 
+    @Ignore
     public DocumentEntity() {
         this.displayName = "";
         this.documentConfidence = 0.0f;

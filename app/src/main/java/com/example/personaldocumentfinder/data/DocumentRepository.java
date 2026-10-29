@@ -9,13 +9,19 @@ import java.util.List;
 public class DocumentRepository {
 
     private final DocumentDao documentDao;
+    private final LiveData<List<DocumentEntity>> allDocuments;
+    private final LiveData<List<DocumentEntity>> favoriteDocuments;
+    private final LiveData<Integer> totalCount;
 
     public DocumentRepository(DocumentDao documentDao) {
         this.documentDao = documentDao;
+        this.allDocuments = documentDao.getAllDocumentsFlow();
+        this.favoriteDocuments = documentDao.getFavoriteDocumentsFlow();
+        this.totalCount = documentDao.getTotalDocumentCountFlow();
     }
 
     public LiveData<List<DocumentEntity>> getAllDocuments() {
-        return documentDao.getAllDocumentsFlow();
+        return allDocuments;
     }
 
     public List<DocumentEntity> getAllDocumentsSync() {
@@ -23,7 +29,7 @@ public class DocumentRepository {
     }
 
     public LiveData<List<DocumentEntity>> getFavoriteDocuments() {
-        return documentDao.getFavoriteDocumentsFlow();
+        return favoriteDocuments;
     }
 
     public List<DocumentEntity> getFavoriteDocumentsSync() {
@@ -31,7 +37,7 @@ public class DocumentRepository {
     }
 
     public LiveData<Integer> getTotalCount() {
-        return documentDao.getTotalDocumentCountFlow();
+        return totalCount;
     }
 
     public int getTotalCountSync() {

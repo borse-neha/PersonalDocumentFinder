@@ -1,6 +1,7 @@
 package com.example.personaldocumentfinder.domain;
 
 import android.content.Context;
+import android.content.Intent;
 import android.database.Cursor;
 import android.media.MediaScannerConnection;
 import android.net.Uri;
@@ -131,9 +132,19 @@ public class StorageManager {
         }
     }
 
+    public InputStream openUriInputStream(Uri uri) throws Exception {
+        if (uri == null) return null;
+        if ("file".equalsIgnoreCase(uri.getScheme())) {
+            return new FileInputStream(new File(uri.getPath()));
+        }
+        return context != null && context.getContentResolver() != null
+                ? context.getContentResolver().openInputStream(uri)
+                : null;
+    }
+
     public String calculateContentHash(Uri uri) {
-        if (uri == null || context == null || context.getContentResolver() == null) return null;
-        try (InputStream inputStream = context.getContentResolver().openInputStream(uri)) {
+        if (uri == null) return null;
+        try (InputStream inputStream = openUriInputStream(uri)) {
             if (inputStream == null) return null;
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             byte[] buffer = new byte[8192];
@@ -155,15 +166,40 @@ public class StorageManager {
 
     public File getOrganizedBaseDir() {
         try {
-            File documentsPublicDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS);
-            File baseAppDir = new File(documentsPublicDir, "Personal Document Finder");
-            if (baseAppDir.exists() || baseAppDir.mkdirs()) {
-                return baseAppDir;
-            } else {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                if (Environment.isExternalStorageManager()) {
+                    File documentsPublicDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS);
+                    File baseAppDir = new File(documentsPublicDir, "Personal Document Finder");
+                    if ((baseAppDir.exists() || baseAppDir.mkdirs()) && canWriteToDir(baseAppDir)) {
+                        return baseAppDir;
+                    }
+                }
                 return getFallbackDir();
+            } else {
+                File documentsPublicDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS);
+                File baseAppDir = new File(documentsPublicDir, "Personal Document Finder");
+                if ((baseAppDir.exists() || baseAppDir.mkdirs()) && canWriteToDir(baseAppDir)) {
+                    return baseAppDir;
+                } else {
+                    return getFallbackDir();
+                }
             }
         } catch (Throwable t) {
             return getFallbackDir();
+        }
+    }
+
+    private boolean canWriteToDir(File dir) {
+        if (dir == null) return false;
+        try {
+            File testFile = new File(dir, ".test_write_" + System.currentTimeMillis());
+            if (testFile.createNewFile()) {
+                testFile.delete();
+                return true;
+            }
+            return false;
+        } catch (Throwable t) {
+            return false;
         }
     }
 
@@ -172,7 +208,7 @@ public class StorageManager {
             File extFiles = context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS);
             if (extFiles != null) {
                 File dir = new File(extFiles, "Personal Document Finder");
-                if (dir.exists() || dir.mkdirs()) return dir;
+                if ((dir.exists() || dir.mkdirs()) && canWriteToDir(dir)) return dir;
             }
             File internal = new File(context.getFilesDir(), "Documents/Personal Document Finder");
             if (!internal.exists()) internal.mkdirs();
@@ -196,10 +232,23 @@ public class StorageManager {
     public CopyResult copyFileToOrganizedStorage(Uri uri, String category, String customFileName) {
         if (uri == null) return null;
         try {
+            try {
+                if (context != null && context.getContentResolver() != null && "content".equals(uri.getScheme())) {
+                    context.getContentResolver().takePersistableUriPermission(
+                            uri,
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    );
+                }
+            } catch (Exception ignored) {}
+
             String originalName = (customFileName != null && !customFileName.trim().isEmpty())
                     ? customFileName
                     : getFileNameFromUri(uri);
             File categoryDir = getCategoryDir(category);
+            if (!categoryDir.exists() && !categoryDir.mkdirs()) {
+                categoryDir = new File(getFallbackDir(), sanitizeCategory(category));
+                categoryDir.mkdirs();
+            }
 
             String storedFileName = generateUniqueFileName(categoryDir, originalName);
             File destFile = new File(categoryDir, storedFileName);
@@ -207,15 +256,31 @@ public class StorageManager {
             long fileSize = 0L;
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
 
-            try (InputStream inputStream = context.getContentResolver().openInputStream(uri)) {
+            try (InputStream inputStream = openUriInputStream(uri)) {
                 if (inputStream == null) return null;
-                try (FileOutputStream outputStream = new FileOutputStream(destFile)) {
+                FileOutputStream outputStream = null;
+                try {
+                    outputStream = new FileOutputStream(destFile);
+                } catch (Exception e) {
+                    // Fall back to app-private fallback dir if public folder write failed
+                    File fallbackCatDir = new File(getFallbackDir(), sanitizeCategory(category));
+                    fallbackCatDir.mkdirs();
+                    storedFileName = generateUniqueFileName(fallbackCatDir, originalName);
+                    destFile = new File(fallbackCatDir, storedFileName);
+                    outputStream = new FileOutputStream(destFile);
+                }
+
+                try {
                     byte[] buffer = new byte[8192];
                     int bytesRead;
                     while ((bytesRead = inputStream.read(buffer)) != -1) {
                         outputStream.write(buffer, 0, bytesRead);
                         digest.update(buffer, 0, bytesRead);
                         fileSize += bytesRead;
+                    }
+                } finally {
+                    if (outputStream != null) {
+                        outputStream.close();
                     }
                 }
             }
@@ -430,13 +495,13 @@ public class StorageManager {
         return file.getName();
     }
 
-    private static String getExtension(String fileName) {
+    public static String getExtension(String fileName) {
         if (fileName == null) return "";
         int dotIdx = fileName.lastIndexOf('.');
         return dotIdx != -1 ? fileName.substring(dotIdx + 1) : "";
     }
 
-    private String getMimeTypeFromExtension(String ext) {
+    public String getMimeTypeFromExtension(String ext) {
         if (ext == null) return "application/octet-stream";
         switch (ext.toLowerCase()) {
             case "pdf":

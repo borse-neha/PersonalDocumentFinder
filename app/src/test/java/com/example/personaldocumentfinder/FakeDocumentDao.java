@@ -11,9 +11,13 @@ import java.util.List;
 public class FakeDocumentDao implements DocumentDao {
 
     public final List<DocumentEntity> documents = new ArrayList<>();
+    private long idCounter = 1L;
 
     @Override
     public long insertDocument(DocumentEntity document) {
+        if (document.getId() <= 0) {
+            document.setId(idCounter++);
+        }
         documents.add(document);
         return document.getId();
     }
